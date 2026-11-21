@@ -20,7 +20,7 @@ import { t, locale } from '@/locales'
 const router = useRouter()
 const searchQuery = ref('')
 const isAddModalOpen = ref(false)
-const { sites: upstreamSites, isAdding, isForceSaving, isRefreshing, addErrorKey, addFailure, clearAddFailure, connectedCount, enabledSiteCount, enabledUpdatingIds, enabledErrorKeys, pinnedUpdatingIds, pinnedErrorKeys, siteSyncStates, syncingSiteIds, addSite, updateSite, deleteSite, setSiteEnabled, setSitePinned, streamRefreshSites, refreshSingleSite, workspaceId, readSiteSnapshot, pendingSiteOperations, saveSiteSettings } = useUpstreamSites()
+const { sites: upstreamSites, isAdding, isForceSaving, isRefreshing, addErrorKey, addFailure, clearAddFailure, connectedCount, enabledSiteCount, enabledUpdatingIds, enabledErrorKeys, pinnedUpdatingIds, pinnedErrorKeys, siteSyncStates, retryReadErrors, syncingSiteIds, addSite, updateSite, deleteSite, setSiteEnabled, setSitePinned, streamRefreshSites, refreshSingleSite, workspaceId, readSiteSnapshot, pendingSiteOperations, saveSiteSettings } = useUpstreamSites()
 const deletingSiteId = ref<string | null>(null)
 const deleteErrorKey = ref<string | null>(null)
 const deleteFailure = ref<UpstreamFailure | null>(null)
@@ -327,8 +327,10 @@ const statusClasses: Record<UpstreamStatus, string> = {
 }
 
 const statusLabel = (status: UpstreamStatus): string => t(`admin.upstream.status.${status}`)
-const siteDisplayStatus = (site: UpstreamSite): UpstreamStatus => upstreamSiteAuthUnconfirmed(site, siteSyncStates.value.get(site.id)) ? 'error' : site.status
-const siteStatusLabel = (site: UpstreamSite): string => upstreamSiteAuthUnconfirmed(site, siteSyncStates.value.get(site.id)) ? '连接状态待确认' : statusLabel(site.status)
+const siteDisplayStatus = (site: UpstreamSite): UpstreamStatus =>
+  site.syncRetry?.phase === 'stopped' || upstreamSiteAuthUnconfirmed(site, siteSyncStates.value.get(site.id)) ? 'error' : site.status
+const siteStatusLabel = (site: UpstreamSite): string =>
+  upstreamSiteAuthUnconfirmed(site, siteSyncStates.value.get(site.id)) ? '连接状态待确认' : statusLabel(siteDisplayStatus(site))
 
 const toggleSiteEnabled = (site: UpstreamSite) => {
   if (siteNeedsVerification(site)) return
@@ -659,6 +661,21 @@ const siteFailureKey = (site: UpstreamSite): string | null => {
   return site.errorKey
 }
 
+const siteSyncFailureDisplay = (site: UpstreamSite): string | null => {
+  const retry = site.syncRetry
+  if (retry && !retryReadErrors.value.get(site.id)?.stopped) {
+    const prefix = 'admin.upstream.syncRetry.'
+    if (retry.phase === 'stopped') {
+      const reason = retry.errorKey ? costFailureText(retry.errorKey) : ''
+      return `${t(prefix + 'stopped')} ${retry.errorDetail || [reason, t(prefix + 'checkFailure')].filter(Boolean).join(' ')}`
+    }
+    const message = t(prefix + retry.phase, { attempted: retry.attempted })
+    return [message, retry.errorDetail].filter(Boolean).join(' ')
+  }
+  const key = siteFailureKey(site)
+  return key ? costFailureText(key) : null
+}
+
 const manualCostReasons = new Set([
   'admin.upstream.errors.announcementAckRequired',
   'admin.upstream.errors.upstreamInsufficientBalance',
@@ -911,11 +928,13 @@ onBeforeUnmount(() => {
         </div>
 
         <p v-if="siteNeedsVerification(site)" class="mt-4 text-xs text-muted-foreground">{{ t('admin.upstream.failure.savedWithoutVerification') }}</p>
-        <div v-if="site.enabled && (siteFailureKey(site) || costFailureDisplay(site))" class="mt-4 flex items-start gap-2 rounded-xl border border-warning/20 bg-warning/10 px-3 py-2 text-xs text-warning" role="alert" aria-live="polite">
+        <div v-if="site.enabled && (siteSyncFailureDisplay(site) || costFailureDisplay(site) || retryReadErrors.has(site.id))" class="mt-4 flex items-start gap-2 rounded-xl border border-warning/20 bg-warning/10 px-3 py-2 text-xs text-warning" role="alert" aria-live="polite">
           <AlertCircle class="mt-0.5 h-3.5 w-3.5 shrink-0" />
           <span>
-            <span class="font-medium">{{ siteFailureKey(site) ? t('admin.upstream.syncStream.error') : '今日成本不可读' }}：</span>
-            {{ siteFailureKey(site) ? costFailureText(siteFailureKey(site) ?? 'admin.upstream.errors.unknown') : costFailureDisplay(site) }}
+            <span class="font-medium">{{ siteSyncFailureDisplay(site) || retryReadErrors.has(site.id) ? t('admin.upstream.syncStream.error') : '今日成本不可读' }}：</span>
+            {{ siteSyncFailureDisplay(site) || costFailureDisplay(site) }}
+            <span v-if="retryReadErrors.has(site.id)" class="block">{{ t('admin.upstream.syncRetry.readFailed') }} {{ retryReadErrors.get(site.id)?.detail }}</span>
+            <span v-if="site.syncRetry?.phase === 'waiting' || site.syncRetry?.phase === 'running'" class="block">{{ t('admin.upstream.syncRetry.effect') }}</span>
             <span v-if="upstreamSiteAuthPaused(site)" class="block">{{ upstreamAuthPauseHelp }}</span>
           </span>
         </div>
@@ -1008,11 +1027,13 @@ onBeforeUnmount(() => {
                   {{ site.enabled ? siteStatusLabel(site) : t('admin.upstream.status.disabled') }}
                 </div>
                 <p v-if="siteNeedsVerification(site)" class="mt-2 max-w-xs text-xs leading-5 text-muted-foreground">{{ t('admin.upstream.failure.savedWithoutVerification') }}</p>
-                <div v-if="site.enabled && (siteFailureKey(site) || costFailureDisplay(site))" class="mt-2 flex max-w-xs items-start gap-1.5 text-xs leading-5 text-destructive" role="alert" aria-live="polite">
+                <div v-if="site.enabled && (siteSyncFailureDisplay(site) || costFailureDisplay(site) || retryReadErrors.has(site.id))" class="mt-2 flex max-w-xs items-start gap-1.5 text-xs leading-5 text-destructive" role="alert" aria-live="polite">
                   <AlertCircle class="mt-0.5 h-3.5 w-3.5 shrink-0" />
                   <span>
-                    <span class="font-medium">{{ siteFailureKey(site) ? t('admin.upstream.syncStream.error') : '今日成本不可读' }}：</span>
-                    {{ siteFailureKey(site) ? costFailureText(siteFailureKey(site) ?? 'admin.upstream.errors.unknown') : costFailureDisplay(site) }}
+                    <span class="font-medium">{{ siteSyncFailureDisplay(site) || retryReadErrors.has(site.id) ? t('admin.upstream.syncStream.error') : '今日成本不可读' }}：</span>
+                    {{ siteSyncFailureDisplay(site) || costFailureDisplay(site) }}
+                    <span v-if="retryReadErrors.has(site.id)" class="block">{{ t('admin.upstream.syncRetry.readFailed') }} {{ retryReadErrors.get(site.id)?.detail }}</span>
+                    <span v-if="site.syncRetry?.phase === 'waiting' || site.syncRetry?.phase === 'running'" class="block">{{ t('admin.upstream.syncRetry.effect') }}</span>
             <span v-if="upstreamSiteAuthPaused(site)" class="block">{{ upstreamAuthPauseHelp }}</span>
                   </span>
                 </div>

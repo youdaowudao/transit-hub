@@ -78,6 +78,9 @@ const requestJson = async <T>(path: string, options: RequestInit = {}): Promise<
     if (response.status === 404 && payload.message === 'admin.upstream.errors.notFound') {
       throw new UpstreamApiError('admin.upstream.errors.siteNotFound', payload.failure)
     }
+    if (response.status === 409 && path.startsWith('/upstream-sites?siteId=') && payload.message === 'admin.adminAccounts.errors.noCurrentAccount') {
+      throw new UpstreamApiError(payload.message, payload.failure)
+    }
     throw new UpstreamApiError(safeErrorKey(payload.message), payload.failure)
   }
 

@@ -51,6 +51,13 @@ type syncFlight struct {
 	done     chan struct{}
 	response Response
 	err      error
+
+	refreshScope *refreshWorkspaceKey
+	retry        *siteSyncRetry
+	invalidated  bool
+	published    *Site
+	fetchErr     error
+	retryHandled bool
 }
 
 // SiteReferenceChecker reads complete local references without importing my_sites.
@@ -81,6 +88,8 @@ type Service struct {
 	deletedSites          map[string]struct{}
 	sessionRefreshFlights map[string]*sessionRefreshFlight
 	syncFlights           map[string]*syncFlight
+	syncRetries           sync.Map // site ID -> *siteSyncRetry; contents are guarded by mu.
+	syncRetriesClosed     bool
 	keyUsageFlights       map[string]*keyUsageFlight
 	keyUsageChanged       chan struct{}
 	keyUsageFinished      map[string]time.Time
@@ -149,6 +158,7 @@ func (s *Service) SetBackgroundTasksDisabled(disabled bool) {
 	s.mu.Lock()
 	s.backgroundTasksDisabled = disabled
 	if disabled {
+		s.clearSyncRetriesLocked()
 		for id := range s.timers {
 			s.clearTimerLocked(id)
 		}
@@ -276,7 +286,21 @@ func (s *Service) List(ctx context.Context, userID string) []Response {
 		if site.AdminAccountID != adminAccountID {
 			continue
 		}
-		responses = append(responses, s.toResponse(ctx, site))
+		var retry *SiteSyncRetry
+		if _, tracked := s.syncRetries.Load(site.ID); tracked {
+			readCtx, cancel := context.WithTimeout(ctx, persistenceTimeout)
+			latest, progress, readErr := s.readSiteWithSyncRetry(readCtx, site.ID)
+			cancel()
+			if readErr == nil {
+				if latest == nil || latest.UserID != userID || latest.AdminAccountID != adminAccountID {
+					continue
+				}
+				site, retry = latest, progress
+			}
+		}
+		response := s.toResponse(ctx, site)
+		response.SyncRetry = retry
+		responses = append(responses, response)
 	}
 	return responses
 }
@@ -930,8 +954,12 @@ func (s *Service) Update(ctx context.Context, userID, id string, dto UpdateReque
 		candidate = publication.Actual
 	}
 	if err == nil {
+		if relogin || domainChanged {
+			s.cancelSiteSyncRetryLocked(id)
+		}
 		s.scheduleSyncLocked(id, &candidate)
 	}
+	retry := s.siteSyncRetryProgressLocked(&candidate)
 	s.mu.Unlock()
 	if err != nil {
 		if domainChanged && relogin && mode == AuthModeToken && strings.TrimSpace(dto.RefreshToken) != "" {
@@ -940,6 +968,7 @@ func (s *Service) Update(ctx context.Context, userID, id string, dto UpdateReque
 		return s.toResponse(ctx, current), err
 	}
 	response := s.toResponse(ctx, &candidate)
+	response.SyncRetry = retry
 	if relogin || domainChanged {
 		if publication.GroupsAccepted {
 			response.GroupRatesWarning = s.saveSnapshot(ctx, &candidate, audit, publication.RowVersion)
@@ -1057,7 +1086,7 @@ func (s *Service) Sync(ctx context.Context, userID string, id string) (Response,
 	if !site.IsEnabled() {
 		return Response{}, newRequestError(ErrorDisabled, "")
 	}
-	return s.sync(ctx, id)
+	return s.syncForRefresh(ctx, id, refreshWorkspaceKey{userID: userID, adminAccountID: aid})
 }
 
 const relevantSiteSyncConcurrency = 5
@@ -1224,10 +1253,10 @@ func (s *Service) SyncAll(ctx context.Context, userID string) ([]Response, error
 		wg.Add(1)
 		go func(index int, id string) {
 			defer wg.Done()
-			response, err := s.sync(ctx, id)
-			if err != nil {
+			response, err := s.syncForRefresh(ctx, id, refreshWorkspaceKey{userID: userID, adminAccountID: adminAccountID})
+			if err != nil && response.SyncRetry == nil {
 				// 同步失败时返回缓存中的当前状态。
-				if cached, cacheErr := s.cache.Get(ctx, id); cacheErr == nil && cached != nil {
+				if cached, cacheErr := s.cache.Get(ctx, id); cacheErr == nil && cached != nil && cached.UserID == userID && cached.AdminAccountID == adminAccountID {
 					response = toResponseForDate(cached, s.keyUsageDate())
 				}
 				results[index] = response
@@ -1304,7 +1333,7 @@ func (s *Service) SyncAllStream(ctx context.Context, userID string, emit SyncEve
 
 			safeEmit(SyncEvent{Event: SyncEventSyncing, SiteID: id})
 
-			response, syncErr := s.sync(ctx, id)
+			response, syncErr := s.syncForRefresh(ctx, id, refreshWorkspaceKey{userID: userID, adminAccountID: adminAccountID})
 			if syncErr != nil || response.Status != StatusConnected {
 				failed.Add(1)
 				logKey := siteErrorKey(syncErr)
@@ -1312,8 +1341,10 @@ func (s *Service) SyncAllStream(ctx context.Context, userID string, emit SyncEve
 					logKey = *response.ErrorKey
 				}
 				log.Printf("[upstream-stream] 同步失败 id=%s reason=%s", id, logKey)
-				if cached, cacheErr := s.cache.Get(ctx, id); cacheErr == nil && cached != nil {
-					response = toResponseForDate(cached, s.keyUsageDate())
+				if response.SyncRetry == nil {
+					if cached, cacheErr := s.cache.Get(ctx, id); cacheErr == nil && cached != nil && cached.UserID == userID && cached.AdminAccountID == adminAccountID {
+						response = toResponseForDate(cached, s.keyUsageDate())
+					}
 				}
 				key := ErrorUnknown
 				if syncErr != nil {
@@ -1337,19 +1368,7 @@ func (s *Service) SyncAllStream(ctx context.Context, userID string, emit SyncEve
 
 // sync 复用同一站点正在进行的同步。调用者取消只结束自身等待，底层同步继续完成。
 func (s *Service) sync(ctx context.Context, id string) (Response, error) {
-	s.mu.Lock()
-	if s.syncFlights == nil {
-		s.syncFlights = make(map[string]*syncFlight)
-	}
-	flight := s.syncFlights[id]
-	if flight == nil {
-		flight = &syncFlight{done: make(chan struct{})}
-		s.syncFlights[id] = flight
-		go s.runSyncFlight(id, flight)
-	}
-	s.mu.Unlock()
-
-	return waitForSyncFlight(ctx, flight)
+	return s.syncWithScope(ctx, id, nil)
 }
 
 func (s *Service) runSyncFlight(id string, flight *syncFlight) {
@@ -1361,6 +1380,7 @@ func (s *Service) runSyncFlight(id string, flight *syncFlight) {
 			log.Printf("[upstream] sync panic recovered id=%s", id)
 		}
 		s.mu.Lock()
+		s.finishSyncRetryLocked(id, flight, &response, err)
 		flight.response = response
 		flight.err = err
 		if s.syncFlights[id] == flight {
@@ -1375,7 +1395,7 @@ func (s *Service) runSyncFlight(id string, flight *syncFlight) {
 			}
 		}
 	}()
-	response, err = s.syncOnce(context.Background(), id)
+	response, err = s.syncSiteOnce(context.Background(), id, flight)
 }
 
 // refreshSessionForSync uses only this site's workspace setting for early refresh.
@@ -1391,13 +1411,24 @@ func (s *Service) refreshSessionForSync(ctx context.Context, site *Site) (siteRe
 
 // syncOnce 执行单个站点的同步流程：刷新会话 → 拉取最新指标 → 更新缓存和数据库。
 func (s *Service) syncOnce(ctx context.Context, id string) (Response, error) {
+	return s.syncSiteOnce(ctx, id, nil)
+}
+
+func (s *Service) syncSiteOnce(ctx context.Context, id string, flight *syncFlight) (Response, error) {
 	s.mu.Lock()
 	site, err := s.readCurrentSite(ctx, id)
 	if err != nil {
 		s.mu.Unlock()
+		if flight != nil && flight.retry != nil {
+			err = siteSnapshotReadError(err)
+		}
 		return Response{}, err
 	}
 	if _, deleted := s.deletedSites[id]; deleted || site == nil || site.Session == nil {
+		s.mu.Unlock()
+		return Response{}, newRequestError(ErrorNotFound, "")
+	}
+	if flight != nil && (flight.invalidated || flight.refreshScope != nil && *flight.refreshScope != siteRefreshWorkspace(site)) {
 		s.mu.Unlock()
 		return Response{}, newRequestError(ErrorNotFound, "")
 	}
@@ -1459,6 +1490,9 @@ func (s *Service) syncOnce(ctx context.Context, id string) (Response, error) {
 	_, deleted := s.deletedSites[id]
 	if readErr != nil || deleted || current == nil || current.UserID != original.UserID || current.AdminAccountID != original.AdminAccountID {
 		s.mu.Unlock()
+		if readErr != nil && flight != nil && flight.retry != nil {
+			return Response{}, siteSnapshotReadError(readErr)
+		}
 		return Response{}, newRequestError(ErrorNotFound, "")
 	}
 	if !current.IsEnabled() {
@@ -1474,6 +1508,11 @@ func (s *Service) syncOnce(ctx context.Context, id string) (Response, error) {
 	if !reflect.DeepEqual(current.Session, effective.Session) {
 		s.mu.Unlock()
 		return s.toResponse(ctx, current), staleSiteRequestError()
+	}
+	if flight != nil && flight.retry != nil && flight.invalidated {
+		s.revokeSyncingLocked(current, effective)
+		s.mu.Unlock()
+		return Response{}, staleSiteRequestError()
 	}
 	expected := cloneSite(current)
 	candidate := cloneSite(current)
@@ -1508,6 +1547,10 @@ func (s *Service) syncOnce(ctx context.Context, id string) (Response, error) {
 		s.revokeSyncingLocked(current, effective)
 		s.mu.Unlock()
 		return s.toResponse(ctx, current), saveErr
+	}
+	if flight != nil {
+		flight.published, flight.fetchErr = &candidate, fetchErr
+		s.updatePublishedSyncRetryLocked(flight)
 	}
 	s.scheduleSyncLocked(id, &candidate)
 	enabledBackground := !s.backgroundTasksDisabled
@@ -1642,6 +1685,7 @@ func (s *Service) Remove(ctx context.Context, userID string, id string) error {
 	}
 	s.mu.Lock()
 	s.deletedSites[id] = struct{}{}
+	s.cancelSiteSyncRetryLocked(id)
 	s.clearTimerLocked(id)
 	s.cancelGroupCostWork(costWorkKey(site))
 	s.mu.Unlock()
@@ -1698,6 +1742,7 @@ func (s *Service) CleanupDeletedWorkspaceSites(ctx context.Context, userID strin
 	s.mu.Lock()
 	for _, id := range ids {
 		s.deletedSites[id] = struct{}{}
+		s.cancelSiteSyncRetryLocked(id)
 		s.clearTimerLocked(id)
 	}
 	// Cleanup may run after the workspace row is gone, so match queued local keys.
@@ -1743,6 +1788,7 @@ func (s *Service) CleanupDeletedWorkspaceSites(ctx context.Context, userID strin
 }
 
 func (s *Service) Close() {
+	s.StopSiteSyncRetries()
 	s.mu.Lock()
 	for id := range s.timers {
 		s.clearTimerLocked(id)
@@ -1765,17 +1811,26 @@ func (s *Service) scheduleInitialSyncLocked(id string, site *Site) bool {
 }
 
 func (s *Service) scheduleSyncWithModeLocked(id string, site *Site, initial bool) bool {
-	s.clearTimerLocked(id)
-	if s.backgroundTasksDisabled {
-		return false
-	}
 	if _, deleted := s.deletedSites[id]; deleted {
+		s.clearTimerLocked(id)
 		return false
 	}
 	if site == nil || !site.IsEnabled() || site.Session == nil || SiteReadAuthError(site) != nil {
+		s.clearTimerLocked(id)
 		return false
 	}
-	config, ok := s.refreshConfigs[refreshWorkspaceKey{userID: site.UserID, adminAccountID: site.AdminAccountID}]
+	if retry := s.siteSyncRetryLocked(id); retry != nil && retry.Phase == syncRetryWaiting {
+		return s.refreshConfigs[retry.scope].Enabled
+	}
+	return s.scheduleWorkspaceSyncLocked(id, siteRefreshWorkspace(site), initial)
+}
+
+func (s *Service) scheduleWorkspaceSyncLocked(id string, scope refreshWorkspaceKey, initial bool) bool {
+	s.clearTimerLocked(id)
+	if s.backgroundTasksDisabled || s.syncRetriesClosed {
+		return false
+	}
+	config, ok := s.refreshConfigs[scope]
 	if !ok || !config.Enabled || config.Interval <= 0 {
 		return false
 	}
@@ -1783,12 +1838,8 @@ func (s *Service) scheduleSyncWithModeLocked(id string, site *Site, initial bool
 	if initial {
 		delay = initialSyncDelay(id, config.Interval)
 	}
-	afterFunc := s.afterFunc
-	if afterFunc == nil {
-		afterFunc = time.AfterFunc
-	}
-	s.timers[id] = afterFunc(delay, func() {
-		s.sync(context.Background(), id)
+	s.setSyncTimerLocked(id, delay, func() {
+		s.syncForRefresh(context.Background(), id, scope)
 	})
 	return true
 }
@@ -1938,10 +1989,11 @@ func (s *Service) saveLocalSiteFields(ctx context.Context, userID, siteID string
 	}
 	err = s.publishExistingSiteLocked(expected, candidate, false, nil, nil)
 	if err == nil && reschedule {
-		s.scheduleSyncLocked(siteID, &candidate)
 		if !candidate.IsEnabled() {
+			s.cancelSiteSyncRetryLocked(siteID)
 			s.cancelGroupCostWork(costWorkKey(&candidate))
 		}
+		s.scheduleSyncLocked(siteID, &candidate)
 	}
 	s.mu.Unlock()
 	if err != nil {
@@ -1968,6 +2020,7 @@ func toResponseForDate(site *Site, date string) Response {
 	return Response{
 		ID:                site.ID,
 		UserID:            site.UserID,
+		AdminAccountID:    site.AdminAccountID,
 		Name:              site.Name,
 		BaseURL:           site.BaseURL,
 		WebsiteURL:        site.WebsiteURL,

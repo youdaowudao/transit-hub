@@ -249,8 +249,16 @@ type Site struct {
 	Session           *Session     `json:"-"`
 }
 
+type SiteSyncRetry struct {
+	Phase       string `json:"phase"`
+	Attempted   int    `json:"attempted"`
+	ErrorKey    string `json:"errorKey,omitempty"`
+	ErrorDetail string `json:"errorDetail,omitempty"`
+}
+
 type Response struct {
 	GroupRatesWarning *GroupRatesWarning `json:"groupRatesWarning,omitempty"`
+	SyncRetry         *SiteSyncRetry     `json:"syncRetry,omitempty"`
 	ID                string             `json:"id"`
 	UserID            string             `json:"-"`
 	AdminAccountID    string             `json:"-"`

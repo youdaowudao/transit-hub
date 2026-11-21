@@ -1,6 +1,6 @@
 import { costFailureText, upstreamRefreshRejectedKey, upstreamSiteAuthUnconfirmed } from '../utils/upstream'
 import { safeScopedErrorText } from '../utils/scopedErrorText'
-import { computed, inject, onBeforeUnmount, ref, watch } from 'vue'
+import { computed, inject, onActivated, onBeforeUnmount, onDeactivated, onMounted, ref, watch } from 'vue'
 import { useAdminAccounts } from './useAdminAccounts'
 import { NotificationControllerKey } from './useNotifications'
 import {
@@ -15,7 +15,7 @@ import {
   updateUpstreamSite,
   updateSiteSettings,
 } from '../api/upstream'
-import type { CreateUpstreamSiteOptions, SiteSettings, UpstreamFailure, SiteSyncState, UpstreamMetricValue, UpstreamMetrics, UpstreamSite, UpstreamSiteForm, UpstreamSiteResponse } from '../types/upstream'
+import type { CreateUpstreamSiteOptions, SiteSettings, SiteSyncRetry, UpstreamFailure, SiteSyncState, UpstreamMetricValue, UpstreamMetrics, UpstreamSite, UpstreamSiteForm, UpstreamSiteResponse } from '../types/upstream'
 
 const logoClasses = [
   'bg-primary/10 text-primary border-primary/20',
@@ -32,10 +32,17 @@ const createSiteId = (): string => {
 const siteLogo = (name: string): string => name.trim().charAt(0).toUpperCase() || 'U'
 
 const emptyMetric = (): UpstreamMetricValue => ({ value: null, display: '-' })
+const noCurrentWorkspaceKey = 'admin.adminAccounts.errors.noCurrentAccount'
+
+const normalizeSyncRetry = (retry: SiteSyncRetry | undefined): SiteSyncRetry | undefined => {
+  if (!retry || !['waiting', 'running', 'exhausted', 'stopped'].includes(retry.phase) ||
+      !Number.isInteger(retry.attempted) || retry.attempted < 1 || retry.attempted > 6) return undefined
+  return { ...retry, errorKey: typeof retry.errorKey === 'string' ? retry.errorKey : undefined, errorDetail: safeScopedErrorText(retry.errorDetail) }
+}
 
 const safeUpstreamErrorKey = (error: unknown): string => {
   const key = error instanceof Error ? error.message.trim() : ''
-  if (/^(?:admin\.upstream\.errors\.[A-Za-z][A-Za-z0-9]*|auth\.errors\.unauthorized)$/.test(key)) return key
+  if (key === noCurrentWorkspaceKey || /^(?:admin\.upstream\.errors\.[A-Za-z][A-Za-z0-9]*|auth\.errors\.unauthorized)$/.test(key)) return key
   return 'admin.upstream.errors.unknown'
 }
 
@@ -64,6 +71,7 @@ const normalizeMetrics = (metrics: UpstreamSiteResponse['metrics'] | null | unde
 
 const normalizeSite = (site: UpstreamSiteResponse, logoBg: string): UpstreamSite => ({
   ...site,
+  syncRetry: normalizeSyncRetry(site.syncRetry),
   groupRatesWarning: site.groupRatesWarning ? {
     message: safeScopedErrorText(site.groupRatesWarning.message),
     detail: safeScopedErrorText(site.groupRatesWarning.detail),
@@ -92,11 +100,16 @@ export const useUpstreamSites = () => {
   const pinnedUpdatingIds = ref(new Set<string>())
   const pinnedErrorKeys = ref(new Map<string, string>())
   const siteSyncStates = ref(new Map<string, SiteSyncState>())
+  const retryReadErrors = ref(new Map<string, { detail?: string; stopped: boolean }>())
   const syncingSiteIds = ref(new Set<string>())
   const siteOperationVersions = ref(new Map<string, number>())
   const pendingSiteOperations = ref(new Set<string>())
   const enabledSiteCount = computed(() => sites.value.filter((site) => site.enabled).length)
-  const connectedCount = computed(() => sites.value.filter((site) => site.enabled && !upstreamSiteAuthUnconfirmed(site, siteSyncStates.value.get(site.id)) && (site.status === 'connected' || site.status === 'syncing')).length)
+  const connectedCount = computed(() => sites.value.filter(site =>
+    site.enabled && site.syncRetry?.phase !== 'stopped' &&
+    !upstreamSiteAuthUnconfirmed(site, siteSyncStates.value.get(site.id)) &&
+    (site.status === 'connected' || site.status === 'syncing'),
+  ).length)
 
   // Reading and mutations have separate generations: an older finally must not
   // invalidate the result of a newer mutation. Each workspace owns its maps.
@@ -143,6 +156,12 @@ export const useUpstreamSites = () => {
     // 同步不会改置顶；逐站结果保留本地置顶，避免较早的同步结果覆盖刚保存的置顶。
     const next = normalizeSite({ ...remote, pinned: current.pinned }, current.logoBg)
     if (preserveWarning && remote.groupRatesWarning === undefined) next.groupRatesWarning = current.groupRatesWarning
+    retryReadErrors.value.delete(remote.id)
+    const syncState = siteSyncStates.value.get(remote.id)
+    if (current.syncRetry && syncState?.phase === 'error' &&
+        (syncState.errorKey === 'admin.upstream.errors.rateLimited' || next.status === 'connected' && !next.syncRetry)) {
+      siteSyncStates.value.delete(remote.id)
+    }
     sites.value[index] = next
   }
 
@@ -162,6 +181,7 @@ export const useUpstreamSites = () => {
           if (removedIds.has(remote.id)) return []
           // A stream may start before the initial objects have loaded.
         }
+        retryReadErrors.value.delete(remote.id)
         return [normalizeSite(remote, current?.logoBg ?? logoClasses[index % logoClasses.length]!)]
       })
       const ids = new Set(result.map(site => site.id))
@@ -186,6 +206,66 @@ export const useUpstreamSites = () => {
     invalidateRead(id)
     return true
   }
+
+  const visible = ref(typeof document !== 'undefined' && document.visibilityState !== 'hidden')
+  const pageActive = ref(true)
+  const retrySiteIds = computed(() => {
+    if (!visible.value || !pageActive.value) return []
+    return sites.value.filter(site => site.enabled && !retryReadErrors.value.get(site.id)?.stopped &&
+      (site.syncRetry?.phase === 'waiting' || site.syncRetry?.phase === 'running')).map(site => site.id)
+  })
+  let retryTimer: ReturnType<typeof setTimeout> | undefined
+  const retryReads = new Map<string, AbortController>()
+
+  const readRetryProgress = async (id: string) => {
+    if (pending.has(id) || retryReads.has(id)) return
+    const owner = { epoch, workspace: workspaceId.value }
+    const version = siteOperationVersions.value.get(id) ?? 0
+    const controller = new AbortController()
+    retryReads.set(id, controller)
+    try {
+      await readSiteSnapshot(id, controller.signal, owner.workspace)
+    } catch (error) {
+      if (!sameWorkspace(owner) || controller.signal.aborted || pending.has(id) ||
+          version !== (siteOperationVersions.value.get(id) ?? 0)) return
+      const key = safeUpstreamErrorKey(error)
+      const failure = error instanceof Error && 'failure' in error ? error.failure as UpstreamFailure | undefined : undefined
+      retryReadErrors.value.set(id, {
+        detail: safeScopedErrorText(failure?.errorDetail) || costFailureText(key),
+        stopped: key === 'admin.upstream.errors.siteNotFound' || key === 'auth.errors.unauthorized' || key === noCurrentWorkspaceKey,
+      })
+    } finally {
+      if (retryReads.get(id) === controller) retryReads.delete(id)
+    }
+  }
+
+  const updateRetryPolling = () => {
+    const ids = retrySiteIds.value
+    for (const [id, controller] of retryReads) {
+      if (!ids.includes(id)) {
+        controller.abort()
+        retryReads.delete(id)
+      }
+    }
+    if (ids.length === 0) {
+      clearTimeout(retryTimer)
+      retryTimer = undefined
+    } else if (retryTimer === undefined) {
+      retryTimer = setTimeout(() => {
+        retryTimer = undefined
+        for (const id of retrySiteIds.value) void readRetryProgress(id)
+        updateRetryPolling()
+      }, 5000)
+    }
+  }
+  watch(retrySiteIds, updateRetryPolling, { flush: 'sync' })
+  const updateVisibility = () => {
+    visible.value = document.visibilityState !== 'hidden'
+    if (visible.value) for (const id of retrySiteIds.value) void readRetryProgress(id)
+  }
+  onMounted(() => document.addEventListener('visibilitychange', updateVisibility))
+  onActivated(() => { pageActive.value = true })
+  onDeactivated(() => { pageActive.value = false })
 
   const addSite = async (form: UpstreamSiteForm, pinned = false, options?: CreateUpstreamSiteOptions): Promise<boolean> => {
     if (isAdding.value) return false
@@ -318,6 +398,7 @@ export const useUpstreamSites = () => {
         const current = sites.value.find(site => site.id === remote.id)
         if ((token && isCurrent(token)) || (!token && !siteOperationVersions.value.has(remote.id))) {
           invalidateRead(remote.id)
+          retryReadErrors.value.delete(remote.id)
           result.push(normalizeSite(current ? { ...remote, pinned: current.pinned } : remote, current?.logoBg ?? logoClasses[index % logoClasses.length]!))
         } else if (current) result.push(current)
       }
@@ -377,6 +458,8 @@ export const useUpstreamSites = () => {
                 if (sameWorkspace(owner) && siteSyncStates.value.get(id) === doneState) siteSyncStates.value.delete(id)
               }, 2000)
               doneTimers.add(timer)
+            } else if (event.site?.syncRetry) {
+              siteSyncStates.value.delete(id)
             } else siteSyncStates.value.set(id, { phase: 'error', errorKey: event.errorKey, errorDetail: event.errorDetail })
           }
         } finally {
@@ -402,7 +485,12 @@ export const useUpstreamSites = () => {
     const token = beginOperation(id, false)
     try {
       await removeUpstreamSite(id)
-      if (sameWorkspace(token)) { removedIds.add(id); sites.value = sites.value.filter(site => site.id !== id); notifications?.siteManagementChanged(workspaceId.value, id, false, true) }
+      if (sameWorkspace(token)) {
+        removedIds.add(id)
+        sites.value = sites.value.filter(site => site.id !== id)
+        retryReadErrors.value.delete(id)
+        notifications?.siteManagementChanged(workspaceId.value, id, false, true)
+      }
     } finally { finishOperation(token) }
   }
 
@@ -421,6 +509,8 @@ export const useUpstreamSites = () => {
       current.enabled = nextSite.enabled ?? true
       notifications?.siteManagementChanged(workspaceId.value, id, current.enabled)
       if (!enabled) {
+        current.syncRetry = undefined
+        retryReadErrors.value.delete(id)
         const next = new Set(syncingSiteIds.value); next.delete(id); syncingSiteIds.value = next
         siteSyncStates.value.delete(id)
       }
@@ -464,6 +554,7 @@ export const useUpstreamSites = () => {
     operationVersions = new Map(); pending = new Map(); removedIds = new Set()
     siteOperationVersions.value = new Map(); pendingSiteOperations.value = new Set()
     siteSyncStates.value = new Map(); syncingSiteIds.value = new Set()
+    retryReadErrors.value = new Map()
     enabledUpdatingIds.value = new Set(); enabledErrorKeys.value = new Map()
     pinnedUpdatingIds.value = new Set(); pinnedErrorKeys.value = new Map()
     isAdding.value = false; isForceSaving.value = false; isRefreshing.value = false; clearAddFailure()
@@ -473,13 +564,15 @@ export const useUpstreamSites = () => {
   void loadSites()
   onBeforeUnmount(() => {
     disposed = true; epoch++
+    pageActive.value = false
+    document.removeEventListener('visibilitychange', updateVisibility)
     streamController?.abort()
     for (const timer of doneTimers) clearTimeout(timer)
     doneTimers.clear()
   })
   return {
     sites, workspaceId, isAdding, isForceSaving, isRefreshing, addErrorKey, addFailure, clearAddFailure,
-    connectedCount, enabledSiteCount, enabledUpdatingIds, enabledErrorKeys, pinnedUpdatingIds, pinnedErrorKeys, siteSyncStates,
+    connectedCount, enabledSiteCount, enabledUpdatingIds, enabledErrorKeys, pinnedUpdatingIds, pinnedErrorKeys, siteSyncStates, retryReadErrors,
     syncingSiteIds, siteOperationVersions, pendingSiteOperations, readSiteSnapshot,
     addSite, updateSite, saveSiteSettings, syncSite, refreshSingleSite, refreshSites,
     streamRefreshSites, deleteSite, setSiteEnabled, setSitePinned, loadSites,

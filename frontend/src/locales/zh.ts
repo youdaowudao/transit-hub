@@ -2524,6 +2524,15 @@ export default {
         done: '同步完成',
         error: '同步失败',
       },
+      syncRetry: {
+        waiting: '上游请求过于频繁（429），后台正在重试（已尝试 {attempted}/6 次）。',
+        running: '上游请求过于频繁（429），后台正在进行第 {attempted}/6 次刷新。',
+        exhausted: '已尝试 6 次，上游仍返回 429，请稍后手动刷新。',
+        stopped: '已停止自动重试。',
+        checkFailure: '请查看 Hub 的本站同步日志，确认原因后再手动刷新。',
+        readFailed: '暂时无法确认本站刷新结果，请刷新列表查看。',
+        effect: '重试会重新读取上游数据。若已开启自动调价，成功后符合原条件时可能调整主站倍率。',
+      },
       failure: {
         forceSave: '强行保存资料',
         forceSaveHelp: '只保留当前输入，不改主站；验证后再启用刷新。',

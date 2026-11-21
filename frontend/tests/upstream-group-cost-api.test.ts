@@ -34,6 +34,12 @@ describe('只读单站费用缓存 API', () => {
     fetchMock.mockResolvedValue(reply({ message: 'admin.upstream.errors.request', failure: { stage: 'metrics', errorDetail: detail } }, 503))
     await expect(listUpstreamSites('site a')).rejects.toMatchObject({ failure: { stage: 'metrics', errorDetail: detail } })
   })
+  it('单站读取保留当前工作区已不存在，原列表沿用已有处理', async () => {
+    const key = 'admin.adminAccounts.errors.noCurrentAccount'
+    fetchMock.mockResolvedValueOnce(reply({ message: key }, 409)).mockResolvedValueOnce(reply({ message: key }, 409))
+    await expect(listUpstreamSites('site a')).rejects.toMatchObject({ key })
+    await expect(listUpstreamSites()).rejects.toMatchObject({ key: 'admin.upstream.errors.request' })
+  })
   it('保留传输取消，调用者可以区分主动关闭与网络失败', async () => {
     const aborted = new DOMException('cancelled', 'AbortError')
     fetchMock.mockRejectedValue(aborted)

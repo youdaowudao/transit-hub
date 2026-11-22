@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/kiss-kedaya/chanshui/internal/api"
 	"github.com/kiss-kedaya/chanshui/internal/hub/questions"
 )
 
@@ -58,7 +59,16 @@ func (s *Store) JudgeItem(ctx context.Context, o Owner, req JudgeRequest, rescor
 		if req.Verdict != "pass" && req.Verdict != "fail" {
 			return Fail(422, "请选择人工判为通过或不通过后重试。本题分数没有改动。", "judge-item")
 		}
-		if err := writeManualJudgment(ctx, tx, req, model); err != nil {
+		var saved struct {
+			Verdict struct {
+				ScoringVersion string `json:"scoring_version"`
+			} `json:"verdict"`
+		}
+		scoringVersion := ""
+		if json.Unmarshal([]byte(summaryRaw), &saved) == nil {
+			scoringVersion = saved.Verdict.ScoringVersion
+		}
+		if err := writeManualJudgment(ctx, tx, req, model, scoringVersion); err != nil {
 			return err
 		}
 		var snapshot Snapshot
@@ -99,20 +109,23 @@ func (s *Store) JudgeItem(ctx context.Context, o Owner, req JudgeRequest, rescor
 	return report, nil
 }
 
-func writeManualJudgment(ctx context.Context, tx *sql.Tx, req JudgeRequest, model string) error {
-	ineligible := Fail(422, "只有已保存回答、且仍待核对或已人工判定的模型自报题可以人工判定。本题分数没有改动。", "judge-item")
-	var judge, status, answer, requestError, stored string
+func writeManualJudgment(ctx context.Context, tx *sql.Tx, req JudgeRequest, model, scoringVersion string) error {
+	ineligible := Fail(422, "只有已保存回答、且仍待核对或已人工判定的模型自报题，或六轮已完成、尚未确认或已人工判定的缓存读写，可以人工判定。本题分数没有改动。", "judge-item")
+	var judge, status, kind, answer, requestError, stored string
 	err := tx.QueryRowContext(ctx, `SELECT COALESCE(json_extract(question_json,'$.definition.judge.type'),''), status,
+		COALESCE(json_extract(question_json,'$.definition.kind'),''),
 		COALESCE(json_extract(result_json,'$.answer'),''), COALESCE(json_extract(result_json,'$.error'),''),
 		COALESCE(result_json -> '$.judgment','null') FROM hub_items WHERE report_id=? AND item_id=?`,
-		req.ReportID, req.ItemID).Scan(&judge, &status, &answer, &requestError, &stored)
+		req.ReportID, req.ItemID).Scan(&judge, &status, &kind, &answer, &requestError, &stored)
 	if errors.Is(err, sql.ErrNoRows) {
 		return ineligible
 	}
 	if err != nil {
 		return err
 	}
-	if judge != questions.ModelIdentityJudge || status != "done" || requestError != "" || strings.TrimSpace(answer) == "" || !questions.ModelIdentityApplies(model) {
+	identityJudge := judge == questions.ModelIdentityJudge && strings.TrimSpace(answer) != "" && questions.ModelIdentityApplies(model)
+	cacheJudge := kind == "cache" && scoringVersion == api.HubScoringVersion
+	if status != "done" || requestError != "" || !identityJudge && !cacheJudge {
 		return ineligible
 	}
 	var old manualJudgment
@@ -122,14 +135,21 @@ func writeManualJudgment(ctx context.Context, tx *sql.Tx, req JudgeRequest, mode
 	if old.Source != "manual" {
 		old.AutoReason = old.Reason
 	}
-	points := 0
+	points, maxPoints := 0, old.Max
 	reason := "人工判为不通过，本题0分；请结合完整回答和其他检测核查上游型号。"
+	if cacheJudge {
+		maxPoints = 1
+		reason = "人工判为不通过，缓存这一项0分；请结合各轮读写记录核查上游缓存。"
+	}
 	if req.Verdict == "pass" {
-		points = old.Max
+		points = maxPoints
 		reason = "人工判为通过，按本题满分计分；自报不证明实际型号。"
+		if cacheJudge {
+			reason = "人工判为通过，缓存这一项按通过计入总分；依据是本项保存的各轮读写记录。"
+		}
 	}
 	judgment := manualJudgment{
-		Judgment: questions.Judgment{Status: "known", Earned: &points, Max: old.Max, Reason: reason, Tags: []string{"人工判定"}},
+		Judgment: questions.Judgment{Status: "known", Earned: &points, Max: maxPoints, Reason: reason, Tags: []string{"人工判定"}},
 		Source:   "manual", AutoReason: old.AutoReason,
 	}
 	raw, err := json.Marshal(judgment)

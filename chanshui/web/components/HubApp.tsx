@@ -681,7 +681,8 @@ export default function HubApp({ initialView = 'new' }: { initialView?: View }) 
         </section>
         <HubReportContent key={report.reportId} report={report} items={items} complete={itemsComplete} itemsReadVersion={itemsReadVersion}
           retryHold={retryBusy || retryPending?.reportId === report.reportId} readHold={runtimeChecking}
-          onRefresh={() => {
+          onRefresh={async expectedReportId => {
+            if (expectedReportId && (!alive.current || latestView.current !== 'report' || lastReport.current?.reportId !== expectedReportId)) return;
             setItemsReadVersion('');
             return openReport(report.reportId);
           }}

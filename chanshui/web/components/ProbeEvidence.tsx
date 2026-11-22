@@ -68,11 +68,14 @@ export function HubProbeEvidence({ item, verifiedCache = false, previous = false
   }
   if (kind === 'cache') {
     const samples = rows(e.samples) as Partial<CacheSample>[];
-    const pass = verifiedCache && judgmentStatus !== 'known' ? undefined : bool(e.pass);
+    const manual = verifiedCache && judgment.source === 'manual';
+    const pass = manual ? (number(judgment.earned) ?? 0) > 0 : verifiedCache && judgmentStatus !== 'known' ? undefined : bool(e.pass);
+    const label = manual ? pass ? '人工判为通过' : '人工判为不通过'
+      : verifiedCache && pass === undefined ? '尚未确认' : !verifiedCache && pass === false ? '未对齐' : capabilityLabel(pass);
     return <div>
       {verifiedCache && samples.length > 0 && <p className="muted">本题已保存样本{previous ? '（上次结果）' : ''}</p>}
-      {!inlineCache && <div className="metric-line"><strong className={pass === true ? 'good' : 'warn'}>{verifiedCache ? pass === undefined ? '尚未确认' : capabilityLabel(pass) : pass === false ? '未对齐' : capabilityLabel(pass)}</strong></div>}
-      <p className="muted">{cacheValidationReason(text(e.reason))}</p>
+      {(!inlineCache || manual) && <div className="metric-line"><strong className={pass === true ? 'good' : 'warn'}>{label}</strong></div>}
+      <p className="muted">{manual && '自动检测记录：'}{cacheValidationReason(text(e.reason))}</p>
       <div className="cache-rates">
         <div><span>末轮缓存命中率</span><strong>{cacheRate(cacheSampleHitRate(samples.at(-1)))}</strong></div>
         <div><span>已记录轮数</span><strong>{samples.length} / 6</strong></div>

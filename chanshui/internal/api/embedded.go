@@ -12,9 +12,10 @@ import (
 )
 
 const (
-	DefaultScoringVersion = "2026-10-02-v6-total"
-	HubScoringVersion     = "2026-11-19-v7-hub"
-	HubCachePendingReason = "缓存尚未确认。可以展开本项查看缺少的回包字段或未完成的轮次，本次报告的总分也暂未确认。"
+	DefaultScoringVersion     = "2026-10-02-v6-total"
+	HubScoringVersion         = "2026-11-19-v7-hub"
+	HubCachePendingReason     = "缓存尚未确认。可以展开本项查看缺少的回包字段或未完成的轮次，本次报告的总分也暂未确认。"
+	HubCacheUnconfirmedReason = "缓存读写尚未确认，这一项暂按 0 分计入总分；详情见下方「缓存读写验证」，确认后总分会更新。"
 )
 
 // ProbeRunner exposes the original probes without starting Server's HTTP API,

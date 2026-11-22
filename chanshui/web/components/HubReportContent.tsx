@@ -28,7 +28,7 @@ export default function HubReportContent({
 }: {
   report: HubReport; items: HubItem[]; complete: boolean; readFailed?: boolean; call: HubCall;
   onRetry?: (ids: string[]) => void; retryDisabled?: boolean;
-  itemsReadVersion: string; retryHold: boolean; readHold: boolean; onRefresh: () => Promise<void>;
+  itemsReadVersion: string; retryHold: boolean; readHold: boolean; onRefresh: (expectedReportId?: string) => Promise<void>;
 }) {
   const view = hubReportView(report, items, complete, readFailed);
   const verified = isVerifiedHubReport(report);
@@ -36,6 +36,9 @@ export default function HubReportContent({
   const singleAsk = object(report.summary).singleAsk === true;
   const retryActive = Boolean(report.retry) && ['queued', 'running'].includes(report.status);
   const itemsReady = complete && itemsReadVersion === currentVersion;
+  // The saved total can arrive before the item judgments for this report version.
+  const preserveTotalScore = Boolean(view.cacheView?.part?.applicable &&
+    (!itemsReady || view.groups.cache?.some(item => itemJudgment(item).source === 'manual')));
   const crossReady = !singleAsk && isHubTerminal(report.status) && !retryActive && !retryHold && !readHold && itemsReady;
 
   const [cross, setCross] = useState<CrossState>({ version: '', op: 0, state: 'idle', attempts: 0 });
@@ -192,7 +195,7 @@ export default function HubReportContent({
           const samples = object(item.result?.evidence).samples;
           const previous = report.retry?.itemIds.includes(item.itemId) && ['queued', 'running'].includes(item.status) && Array.isArray(samples) && samples.length > 0;
           return <HubQuestionDetails key={item.itemId} item={item} reportId={report.reportId} reportStatus={report.status}
-            call={call} onRetry={onRetry} retryDisabled={retryDisabled} previous={previous} verifiedScoring cacheEvidenceInline={item === inlineItem} />;
+            call={call} onRetry={onRetry} onJudged={() => onRefresh(report.reportId)} retryDisabled={retryDisabled} previous={previous} verifiedScoring cacheEvidenceInline={item === inlineItem} />;
         })}</div>
       </>;
       continue;
@@ -249,20 +252,27 @@ export default function HubReportContent({
     questions.knowledge = <><p className="muted" data-testid="knowledge-date-comparison">{[sharedDate,knowledgeComparison].filter(Boolean).join(" ")}</p>{questions.knowledge}</>;
   }
   const sectionContent: Record<string, ReactNode> = Object.fromEntries(Object.entries(view.messages).map(([key, text]) => [key, <p key={key} className="muted">{text}</p>]));
+  const ended = isHubTerminal(report.status);
   if (view.cacheView) {
     const part = view.cacheView.part;
+    const totalVisible = typeof view.verdict.total?.score === 'number' && !view.totalLabel;
+    let cacheUnconfirmed = '缓存尚未确认。可以展开本项查看缺少的回包字段或未完成的轮次，本次报告的总分也暂未确认。';
+    if (totalVisible) {
+      cacheUnconfirmed = ended
+        ? '缓存尚未确认，总分里这一项暂按 0 分计算。请展开下面的缓存项查看原因：六轮都已完成的，可以人工判为通过或不通过；请求失败或未完成的，可以补测。'
+        : '检测还在进行，缓存这一项暂按 0 分计入总分；检测结束后这里会显示缓存结果和可用的处理办法。';
+    }
     sectionContent.cache = <>
       <div className="metric-line"><strong className={part?.known && part.points === 1 ? 'good' : undefined}>
         {!part ? '等待结果' : !part.known ? '尚未确认' : part.points === 1 ? '通过' : '未通过'}
       </strong></div>
       {!part ? <p className="muted">本项尚未记录分类结果，请查看本次检测状态。</p> : !part.known &&
-        <p className="muted">缓存尚未确认。可以展开本项查看缺少的回包字段或未完成的轮次，本次报告的总分也暂未确认。</p>}
+        <p className="muted">{cacheUnconfirmed}</p>}
     </>;
   }
   if (view.native && !view.verdict.iq && questions.iq) sectionContent.iq = questions.iq;
   // Preserve the upstream omission of an unselected vision section.
   if (complete && !view.groups.vision?.length) sectionContent.vision = null;
-  const ended = isHubTerminal(report.status);
   const startedAt = typeof report.startedAtMs === 'number' ? report.startedAtMs : report.status === 'queued' ? 0 : report.createdAtMs;
   const timing = startedAt && (!ended || report.updatedAtMs) ? { started_at: new Date(startedAt).toISOString(), ...(ended ? { finished_at: new Date(report.updatedAtMs!).toISOString() } : {}), total_ms: ended ? Math.max(0, report.updatedAtMs! - startedAt) : 0, last_run_ms: 0, runs: 1 } : undefined;
   if(singleAsk){const item=items[0],raw=object(object(item?.result?.evidence).single_ask);return <>
@@ -274,7 +284,7 @@ export default function HubReportContent({
     {view.native && items.some(item=>item.status==='done'&&item.definition.judge.type!=='model_identity'&&!hasOriginalItemDTO(item)&&!['not_asked','not_applicable'].includes(itemJudgment(item).status??'')) && <p className="muted">本报告含自定义或旧格式结果，已保存回答可逐项展开；旧版未保存的原诊断不能补回，成功结果不会重新提问。</p>}
     {!view.native && ended && <p className="muted">这是旧版接入保存的报告；已有回答保留，但当时未保存的原版诊断不能补回。新检测使用原程序；失败项可在原报告补测。</p>}
     <HubCrossCheckCard cross={crossView} items={items} onRetry={retryCross} onRefresh={() => void refreshCross()} refreshing={manualRefresh} />
-    <ResultCards verdict={view.native ? originalVerdict : view.verdict} model={report.model} loading={!ended} showCache={view.cacheView?.visible ?? Boolean(view.groups.cache)} savedScore={!view.native} totalLabel={view.totalLabel} questions={questions} sectionContent={sectionContent} questionExtra={view.native ? extras : undefined} onQuestionOpen={view.native ? id=>void openQuestion(id) : undefined} collapseVision={view.native} questionTail={customIQ} knowledgeExtra={knowledgeDetail} knowledgeAskLimit={knowledgeAskLimit}
+    <ResultCards verdict={view.native ? originalVerdict : view.verdict} model={report.model} loading={!ended} showCache={view.cacheView?.visible ?? Boolean(view.groups.cache)} savedScore={!view.native} preserveTotalScore={preserveTotalScore} totalLabel={view.totalLabel} questions={questions} sectionContent={sectionContent} questionExtra={view.native ? extras : undefined} onQuestionOpen={view.native ? id=>void openQuestion(id) : undefined} collapseVision={view.native} questionTail={customIQ} knowledgeExtra={knowledgeDetail} knowledgeAskLimit={knowledgeAskLimit}
       injectionNote={injection ? INJECTION_NOTE : undefined} injectionDetail={injection ? <HubInjectionDetail item={injection} cross={crossView} model={report.model} call={call} /> : undefined} />
     <ProbeTimeline probes={view.probes} status={report.status} timing={view.native ? view.verdict.timing || timing : timing} progress={view.progress}>
       {!report.model.toLowerCase().startsWith('claude-') && questions.thinking}

@@ -32,15 +32,16 @@ type Config struct {
 	Notify          func(string, map[string]any)
 }
 type itemResult struct {
-	Recognized   bool               `json:"recognized,omitempty"`
-	Answer       string             `json:"answer,omitempty"`
-	ThinkingText string             `json:"thinkingText,omitempty"`
-	Error        string             `json:"error,omitempty"`
-	Judgment     questions.Judgment `json:"judgment"`
-	Metrics      *gateway.Metrics   `json:"metrics,omitempty"`
-	Evidence     any                `json:"evidence,omitempty"`
-	Attempts     int                `json:"attempts"`
-	Ms           int64              `json:"ms"`
+	Recognized     bool               `json:"recognized,omitempty"`
+	Answer         string             `json:"answer,omitempty"`
+	ThinkingText   string             `json:"thinkingText,omitempty"`
+	Error          string             `json:"error,omitempty"`
+	Judgment       questions.Judgment `json:"judgment"`
+	ManualJudgment bool               `json:"-"`
+	Metrics        *gateway.Metrics   `json:"metrics,omitempty"`
+	Evidence       any                `json:"evidence,omitempty"`
+	Attempts       int                `json:"attempts"`
+	Ms             int64              `json:"ms"`
 }
 
 func clean(value any, secrets ...string) any {
@@ -824,8 +825,16 @@ func savedResult(raw json.RawMessage) (itemResult, error) {
 		var status string
 		if json.Unmarshal(saved.Judgment, &status) == nil {
 			out.Judgment.Status = status
-		} else if e := json.Unmarshal(saved.Judgment, &out.Judgment); e != nil {
-			return itemResult{}, e
+		} else {
+			if e := json.Unmarshal(saved.Judgment, &out.Judgment); e != nil {
+				return itemResult{}, e
+			}
+			var judgment struct {
+				Source string `json:"source"`
+			}
+			if json.Unmarshal(saved.Judgment, &judgment) == nil {
+				out.ManualJudgment = judgment.Source == "manual"
+			}
 		}
 	}
 	return out, nil

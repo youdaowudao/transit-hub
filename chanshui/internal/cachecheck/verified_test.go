@@ -50,11 +50,68 @@ func chatUsage(read, write, total int) string {
 	return fmt.Sprintf(`{"prompt_tokens":%d,"cached_tokens":%d,"cache_write_tokens":%d}`, total, read, write)
 }
 
+func TestVerifiedCacheZeroWritesJudgeWholeConversation(t *testing.T) {
+	const missingRead = `{"prompt_tokens":4000,"cached_tokens":null,"cache_write_tokens":0}`
+	const zeroInput = `{"prompt_tokens":0,"cached_tokens":0,"cache_write_tokens":0}`
+	for _, tc := range []struct {
+		name          string
+		reads         [cacheTurns]int
+		turn          int
+		usageOverride string
+		known, pass   bool
+		reason        string
+	}{
+		{name: "a_multiple_hits", reads: [cacheTurns]int{0, 0, 1920, 0, 1920, 1920}, known: true, pass: true, reason: "第3、5、6轮"},
+		{name: "b_fifth_miss", reads: [cacheTurns]int{0, 1920, 1920, 1920, 0, 1920}, known: true, pass: true},
+		{name: "c_final_miss", reads: [cacheTurns]int{0, 1920, 1920, 1920, 1920, 0}, known: true, pass: true},
+		{name: "d_intermittent_reads", reads: [cacheTurns]int{0, 3200, 0, 0, 0, 3328}, known: true, pass: true},
+		{name: "e_only_first_hit", reads: [cacheTurns]int{1920, 0, 0, 0, 0, 0}, known: true, reason: "第2至6轮都没有读到缓存"},
+		{name: "f_all_zero", known: true, reason: "六轮请求均已完成，接口明确回传的缓存读取和写入都为 0。本次缓存未通过。"},
+		{name: "g_missing_read", reads: [cacheTurns]int{0, 1920, 1920, 1920, 0, 1920}, turn: 4, usageOverride: missingRead, reason: "第4轮没有返回有效的缓存读取或总输入"},
+		{name: "h_zero_input", reads: [cacheTurns]int{0, 0, 1920, 0, 1920, 1920}, turn: 3, usageOverride: zeroInput, reason: "第3轮没有返回有效的缓存读取或总输入"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			usage := make([]string, cacheTurns)
+			for i, read := range tc.reads {
+				usage[i] = chatUsage(read, 0, 4000)
+			}
+			if tc.turn > 0 {
+				usage[tc.turn-1] = tc.usageOverride
+			}
+			result := measureUsage(t, "chat", usage...)
+			if tc.known != (result.Pass != nil) || result.Pass != nil && *result.Pass != tc.pass {
+				t.Errorf("cache judgment=%v, want known=%v and pass=%v: %s", result.Status, tc.known, tc.pass, result.Reason)
+			}
+			if !strings.Contains(result.Reason, tc.reason) || tc.name == "f_all_zero" && result.Reason != tc.reason {
+				t.Errorf("cache reason=%q, want %q", result.Reason, tc.reason)
+			}
+		})
+	}
+	t.Run("i_missing_input", func(t *testing.T) {
+		var metrics [cacheTurns]gateway.Metrics
+		for i, read := range []int{0, 0, 1920, 0, 1920, 1920} {
+			metrics[i].Protocol = "chat"
+			metrics[i].CacheUsage = &gateway.CacheUsage{
+				Input: gateway.CacheCount{Value: 4000, State: gateway.CacheCountValid},
+				Read:  gateway.CacheCount{Value: read, State: gateway.CacheCountValid},
+				Write: gateway.CacheCount{State: gateway.CacheCountValid},
+			}
+		}
+		metrics[2].CacheUsage.Input = gateway.CacheCount{State: gateway.CacheCountMissing}
+		result := fromVerifiedMetrics(metrics[:], "fixture", "chat", false)
+		if result.Pass != nil || !strings.Contains(result.Reason, "第3轮") {
+			t.Fatalf("missing input should leave the judgment unconfirmed: %s: %s", result.Status, result.Reason)
+		}
+	})
+}
+
 func TestVerifiedCacheChainEvidence(t *testing.T) {
 	first := chatUsage(0, 1800, 2000)
 	warm := chatUsage(2000, 27, 2060)
 	last := chatUsage(2057, 0, 2060)
 	unknown := `{"prompt_tokens":2060,"cached_tokens":2000,"cache_write_tokens":null}`
+	zeroWriteWarm := chatUsage(2000, 0, 2060)
+	missingWrite := `{"prompt_tokens":2060,"cached_tokens":2000}`
 	r := measureUsage(t, "chat", first, warm, warm, warm, warm, last)
 	if r.Pass == nil || !*r.Pass || r.Expected != 2027 || r.Actual != 2057 || r.Delta != 30 {
 		t.Fatalf("valid chain did not pass with expected transition: %+v", r)
@@ -68,6 +125,7 @@ func TestVerifiedCacheChainEvidence(t *testing.T) {
 		known bool
 	}{
 		{"cannot exclude middle rewrite", []string{first, warm, unknown, warm, warm, last}, false},
+		{"five explicit zero writes and one missing", []string{chatUsage(0, 0, 2060), zeroWriteWarm, missingWrite, zeroWriteWarm, zeroWriteWarm, zeroWriteWarm}, false},
 		{"missing only possible growth", []string{first, chatUsage(1, 0, 2000), unknown, chatUsage(1, 0, 2000), chatUsage(1, 0, 2000), chatUsage(1, 0, 2000)}, false},
 		{"missing last read", []string{first, warm, warm, warm, warm, `{"prompt_tokens":2060,"cached_tokens":null,"cache_write_tokens":0}`}, false},
 		{"confirmed middle rewrite with missing data elsewhere", []string{first, chatUsage(0, 2000, 2060), unknown, warm, warm, last}, true},

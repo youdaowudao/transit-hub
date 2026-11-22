@@ -92,10 +92,7 @@ func TestReportV7ConfirmedCacheZeroAndMissingEvidence(t *testing.T) {
 					t.Error("cache part missing from a report projection")
 				}
 			}
-			var score any
-			if tc.known {
-				score = float64(0)
-			}
+			score := float64(0)
 			if summary["totalScore"] != score || asMap(summary["total"])["score"] != score || asMap(savedVerdict["total"])["score"] != score {
 				t.Errorf("expected all official totals to be %v, got %v, %v, %v", score, summary["totalScore"], asMap(summary["total"])["score"], asMap(savedVerdict["total"])["score"])
 			}
@@ -178,10 +175,9 @@ func TestReportV7CacheRetryKeepsOriginalIQAndLegacyVersion(t *testing.T) {
 	for _, tc := range []struct {
 		name, version string
 		iqScore       float64
-		totalUnknown  bool
 	}{
-		{"new", "2026-11-19-v7-hub", 50, true},
-		{"old", "2026-10-02-v6-total", 0, false},
+		{"new", "2026-11-19-v7-hub", 50},
+		{"old", "2026-10-02-v6-total", 0},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			s, owner, report, cred := scoringReport(t, "cache", "Q5")
@@ -211,8 +207,8 @@ func TestReportV7CacheRetryKeepsOriginalIQAndLegacyVersion(t *testing.T) {
 				return readScoringReport(t, s, owner, id)
 			}
 			_, before := run()
-			if before["iqScore"] != tc.iqScore || (before["totalScore"] == nil) != tc.totalUnknown {
-				t.Fatalf("unexpected initial IQ=%v total=%v, calls iq=%d cache=%d", before["iqScore"], before["totalScore"], iqCalls.Load(), cacheCalls.Load())
+			if _, numeric := before["totalScore"].(float64); before["iqScore"] != tc.iqScore || !numeric {
+				t.Errorf("unexpected initial IQ=%v total=%v, calls iq=%d cache=%d", before["iqScore"], before["totalScore"], iqCalls.Load(), cacheCalls.Load())
 			}
 			if _, err := s.RetryReport(t.Context(), owner, store.RetryRequest{ReportID: id, RetryID: strings.Repeat("c", 32), ItemIDs: []string{"cache"}}); err != nil {
 				t.Fatal(err)

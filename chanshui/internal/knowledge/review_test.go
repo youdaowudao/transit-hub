@@ -7,7 +7,7 @@ import (
 
 func TestBoundaryReviewNeedsIndependentExplicitAnswers(t *testing.T) {
 	var probes []Probe
-	for _, p := range CurrentAnchors() {
+	for _, p := range PreviousAnchors() {
 		if p.HappenedAt >= "2026-05-19" && p.HappenedAt <= "2026-06-01" {
 			probes = append(probes, p)
 		}
@@ -30,7 +30,7 @@ func TestBoundaryReviewNeedsIndependentExplicitAnswers(t *testing.T) {
 }
 
 func TestBoundaryReviewMissingWindowAndNoExtraRetryRequests(t *testing.T) {
-	for _, p := range CurrentAnchors() {
+	for _, p := range PreviousAnchors() {
 		if p.HappenedAt != "2026-04-26" {
 			continue
 		}
@@ -50,7 +50,7 @@ func TestBoundaryReviewMissingWindowAndNoExtraRetryRequests(t *testing.T) {
 
 func TestBoundaryBudgetConflictAndRetryAnchor(t *testing.T) {
 	var first, second Probe
-	for _, p := range CurrentAnchors() {
+	for _, p := range PreviousAnchors() {
 		if p.HappenedAt == "2026-05-20" {
 			first = p
 		}
@@ -114,7 +114,7 @@ func TestReviewRejectsMissingBodyAndTruncation(t *testing.T) {
 
 func TestRetryKeepsDirectFailureReason(t *testing.T) {
 	var a, b Probe
-	for _, p := range CurrentAnchors() {
+	for _, p := range PreviousAnchors() {
 		if p.HappenedAt == "2026-05-20" {
 			a = p
 		}

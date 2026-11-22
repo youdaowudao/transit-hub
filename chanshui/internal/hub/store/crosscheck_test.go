@@ -71,6 +71,14 @@ VALUES(?,?,?,?,'done',?,?)`, source, item.id, item.section, i*10, item.question,
 	if len(got.Items) != 3 || got.Items[2].OrderIndex != 20 || len(got.Peers) != 20 {
 		t.Fatalf("ordering or peer limit incorrect: %d items, %d peers", len(got.Items), len(got.Peers))
 	}
+	if _, err := s.db.ExecContext(t.Context(), `UPDATE hub_items SET result_json=json_set(result_json,'$.judgment.source','manual')
+		WHERE report_id=? AND item_id='model'`, source); err != nil {
+		t.Fatal(err)
+	}
+	manual, err := s.CrossCheckData(t.Context(), testOwner, source)
+	if err != nil || manual.Identity == nil || manual.Identity.Source != "manual" || manual.Identity.Earned == nil || *manual.Identity.Earned != 0 {
+		t.Fatalf("manual score lost its source while projecting the report: %+v (%v)", manual.Identity, err)
+	}
 	for i, p := range got.Peers {
 		if p.ReportID != fmt.Sprintf("%032x", i+20) {
 			t.Fatalf("wrong candidate or order at index %d: %s", i, p.ReportID)

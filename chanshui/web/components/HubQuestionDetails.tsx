@@ -2,10 +2,11 @@
 import { useState } from 'react';
 import { useI18n } from '../lib/i18n';
 import { HubProbeEvidence } from './ProbeEvidence';
+import { HubRequestError } from '../lib/hub-bridge';
 import type { HubCall, HubItem } from '../lib/hub-types';
 import { canRetryHubItem, itemJudgment, itemLabel, itemPoints, object } from '../lib/hub-report-view';
 
-export default function HubQuestionDetails({ item, call, reportId, reportStatus = '', number, onRetry, retryDisabled, previous, bodyOnly = false, verifiedScoring = false, cacheEvidenceInline = false }: { item: HubItem; call: HubCall; reportId: string; reportStatus?: string; number?: number; onRetry?: (ids: string[]) => void; retryDisabled?: boolean; previous?: boolean; bodyOnly?: boolean; verifiedScoring?: boolean; cacheEvidenceInline?: boolean }) {
+export default function HubQuestionDetails({ item, call, reportId, reportStatus = '', number, onRetry, retryDisabled, onJudged, previous, bodyOnly = false, verifiedScoring = false, cacheEvidenceInline = false }: { item: HubItem; call: HubCall; reportId: string; reportStatus?: string; number?: number; onRetry?: (ids: string[]) => void; retryDisabled?: boolean; onJudged?: () => Promise<void>; previous?: boolean; bodyOnly?: boolean; verifiedScoring?: boolean; cacheEvidenceInline?: boolean }) {
   const { t: tr } = useI18n();
   const [image, setImage] = useState(''), [error, setError] = useState('');
   const label = itemLabel(item, reportStatus), points = label === '完成' ? itemPoints(item) : '', result = item.result ?? {}, judgment = itemJudgment(item);
@@ -16,11 +17,40 @@ export default function HubQuestionDetails({ item, call, reportId, reportStatus 
   const observation = object(object(result.evidence).row);
   const extract = typeof observation.answer === 'string' ? observation.answer : '';
   const hasAnswer = typeof result.answer === 'string' && Boolean(result.answer.trim());
+  const [judging, setJudging] = useState(false), [judgeError, setJudgeError] = useState('');
+  const manual = judgment.source === 'manual';
+  const detectionActive = reportStatus === 'queued' || reportStatus === 'running';
+  const canJudge = Boolean(onJudged) && item.definition.judge.type === 'model_identity' && hasAnswer && !result.error &&
+    (item.status === 'done' || detectionActive && ['queued', 'running'].includes(item.status)) && (judgment.status === 'unknown' || manual);
+  const currentVerdict = manual ? judgment.earned === 0 ? 'fail' : 'pass' : '';
+  const judgeItem = async (verdict: 'pass' | 'fail') => {
+    if (!onJudged || judging || detectionActive) return;
+    setJudging(true);
+    setJudgeError('');
+    try {
+      await call('judge-item', { reportId, itemId: item.itemId, verdict });
+    } catch (e) {
+      const reason = e instanceof Error ? e.message.replace(/[。.]$/, '') : '暂时无法确认保存失败的原因，请核查运行状态';
+      const rejected = e instanceof HubRequestError && e.details.operationResult === 'not_started' &&
+        ['judge-item', 'report', 'workspace', 'input', 'storage'].some(step => step === e.details.step);
+      setJudgeError(rejected
+        ? `人工判定没有保存：${reason}。本题分数和报告总分保持不变，可刷新报告后重试。`
+        : `人工判定的保存结果尚未确认：${reason}。请刷新报告核对判定和分数后再决定是否重试。`);
+      setJudging(false);
+      return;
+    }
+    try {
+      await onJudged();
+    } finally {
+      setJudging(false);
+    }
+  };
+  const retry = onRetry && canRetryHubItem(item) && <><button type="button" className="btn-secondary" disabled={retryDisabled || judging} onClick={() => onRetry([item.itemId])}>补测此项</button><p className="muted">只重新提问此失败或未完成项，成功结果保留；可能产生请求费用，结果更新到本报告，不修改主站。</p></>;
   const showKnowledgeAnswer = knowledge && (hasAnswer || extract || item.status === 'done' && judgment.status === 'reference');
   const eventDate = knowledge ? String(item.definition.parameters?.date ?? '') : '';
   const body=<>
     {previous && <p className="muted">正在补测；下面保留的是上次结果，当前结果尚未确认。</p>}
-    {onRetry && canRetryHubItem(item) && <><button type="button" className="btn-secondary" disabled={retryDisabled} onClick={() => onRetry([item.itemId])}>补测此项</button><p className="muted">只重新提问此失败或未完成项，成功结果保留；可能产生请求费用，结果更新到本报告，不修改主站。</p></>}
+    {!canJudge && retry}
     <h4>本次实际题目</h4><pre>{(result.evidence && typeof result.evidence==='object' && 'prompt' in result.evidence ? String((result.evidence as {prompt:string}).prompt) : item.prompt) || (item.imageAvailable ? '题面在图片中' : '使用本项固定检测流程')}</pre>
     {item.imageAvailable && <><button type="button" className="btn-secondary" onClick={async () => { try { const data = await call<{ dataURL: string }>('image', { reportId, itemId: item.itemId }); setImage(data.dataURL); setError(''); } catch (e) { setError(e instanceof Error ? e.message : '读取已保存图片时中断，请重试读取；不会重新检测。'); } }}>查看题目图片</button><p className="muted">只读取本次已保存图片，不重新检测。</p>{image && <img className="question-image" src={image} alt="本次检测实际使用的题目图片" />}</>}
     {showKnowledgeAnswer && <>
@@ -33,6 +63,14 @@ export default function HubQuestionDetails({ item, call, reportId, reportStatus 
     {label === '待人工查看' && <p className="muted">此题只供人工查看，不参与自动得分。</p>}
     {(result.half || judgment.half) && <p className="muted">{verifiedScoring && item.definition.kind === 'iq' ? '本题实际获得的分数计入推理百分制。' : '本题半分只展示卷面，不进入推理通过分子。'}</p>}
     {judgment.reason && <p className="muted">{judgment.reason}</p>}
+    {canJudge && <>
+      <button type="button" className="btn-secondary" disabled={detectionActive || judging || currentVerdict === 'pass'} onClick={() => void judgeItem('pass')}>人工判为通过</button>
+      <button type="button" className="btn-secondary" disabled={detectionActive || judging || currentVerdict === 'fail'} onClick={() => void judgeItem('fail')}>人工判为不通过</button>
+      {retry}
+      <p className="muted">看过上面的模型回答后由你判定：通过得本题满分，不通过得 0 分。只改本报告这一题并重算推理分和总分，不重新提问、不产生请求费用、不修改主站；之后可以改判。</p>
+      {detectionActive && <p className="muted">检测或补测进行中，结束后才能人工判定。</p>}
+      {judgeError && <p className="error-box" role="alert">{judgeError}</p>}
+    </>}
     {(result.error || error) && <p className="error-box" role="alert">{result.error || error}</p>}
     {label === '未完成' && <p className="muted">{item.status === 'queued' ? '本次检测已结束，此项未执行。' : '本次检测已结束，此项未完成；已发出的请求可能已计费。'}</p>}
     {!cacheEvidenceInline && (label !== '未完成' || verifiedCache && previous) && <HubProbeEvidence item={item} verifiedCache={verifiedCache} previous={previous} />}
@@ -45,7 +83,7 @@ export default function HubQuestionDetails({ item, call, reportId, reportStatus 
   </>;
   if(bodyOnly)return body;
   return <details className="question" data-item-id={item.itemId}>
-    <summary><span>{number === undefined ? '' : `Q${number} · `}{eventDate && eventDate + ' · '}{tr(item.definition.title)}</span><b className={label === '请求失败' ? 'bad' : full ? 'good' : 'warn'}>{points || label}</b></summary>
+    <summary><span>{number === undefined ? '' : `Q${number} · `}{eventDate && eventDate + ' · '}{tr(item.definition.title)}</span><b className={label === '请求失败' ? 'bad' : full ? 'good' : 'warn'}>{manual ? '人工判定' : points || label}</b></summary>
     {body}
   </details>;
 }

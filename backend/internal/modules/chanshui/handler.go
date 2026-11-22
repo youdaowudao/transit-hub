@@ -247,6 +247,24 @@ func (s *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if len(parts) == 3 && parts[0] == "reports" && parts[2] == "retry" && r.Method == http.MethodPost {
+		if r.URL.Query().Get("action") == "judge-item" {
+			var input struct {
+				ItemID  string `json:"itemId"`
+				Verdict string `json:"verdict"`
+			}
+			if e := decode(r, &input); e != nil {
+				fail(w, e)
+				return
+			}
+			result, e := s.queryJSON(r.Context(), "judge-item", owner,
+				map[string]string{"reportId": parts[1], "itemId": input.ItemID, "verdict": input.Verdict}, nil, false)
+			if e != nil {
+				fail(w, e)
+				return
+			}
+			reply(w, 200, result)
+			return
+		}
 		var input RetryInput
 		if e := decode(r, &input); e != nil {
 			fail(w, e)

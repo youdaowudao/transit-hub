@@ -221,6 +221,13 @@ func query(ctx context.Context, s *store.Store, env wire.Envelope, c wire.Contin
 		}
 		v, e := s.RetryReport(ctx, o, a)
 		return store.ReportView(v), "", e
+	case "judge-item":
+		var a store.JudgeRequest
+		if e := decode(env.Args, &a); e != nil {
+			return nil, "", e
+		}
+		v, e := s.JudgeItem(ctx, o, a, engine.RescoreSummary)
+		return store.ReportView(v), "", e
 	case "create-report":
 		var a store.CreateRequest
 		if e := decode(env.Args, &a); e != nil {
@@ -368,7 +375,7 @@ func toCrossInput(projected store.CrossCheckProjection) prefixcheck.CrossInput {
 		in.Injections = append(in.Injections, *injection)
 	}
 	if value := projected.Identity; value != nil {
-		in.Identity = &prefixcheck.IdentityInput{ItemID: value.ItemID, OrderIndex: value.OrderIndex, Status: value.Status, Earned: value.Earned, Max: value.Max}
+		in.Identity = &prefixcheck.IdentityInput{ItemID: value.ItemID, OrderIndex: value.OrderIndex, Status: value.Status, Source: value.Source, Earned: value.Earned, Max: value.Max}
 	}
 	for _, peer := range projected.Peers {
 		in.Peers = append(in.Peers, prefixcheck.PeerInput{

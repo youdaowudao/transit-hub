@@ -70,7 +70,7 @@ export default function ResultCards({
   loading = false,
   showCache = false,
   savedScore = false, totalLabel = "", questions, sectionContent, questionExtra, onQuestionOpen, collapseVision = false, questionTail, knowledgeExtra,
-  injectionNote, injectionDetail,
+  injectionNote, injectionDetail, knowledgeAskLimit,
 }: {
   verdict: DetectVerdict;
   model?: string;
@@ -87,6 +87,7 @@ export default function ResultCards({
   knowledgeExtra?: (id:string)=>ReactNode;
   injectionNote?: string;
   injectionDetail?: ReactNode;
+  knowledgeAskLimit?: 10 | 16;
 }) {
   const { t: tr } = useI18n();
   const a = v.injection,
@@ -102,6 +103,7 @@ export default function ResultCards({
   const review = knowledge?.boundary_review;
   const legacyUnknownPair = review?.status === "two_unknown" && review.method !== "cross_year";
   const crossYearEstimate = review?.method === "cross_year" && knowledge?.status === "estimated" && review.status === "two_unknown";
+  const preliminaryRange = review?.method === "cross_year" && review.status === "unconfirmed" && review.from && review.to;
   const reviewedIds = [review?.anchor_id, review?.check_id].filter(Boolean);
   const reviewedRows = review && review.status !== "not_needed" && review.reason !== "retry_pending"
     ? eventRows.filter(row => reviewedIds.includes(row.id)) : [];
@@ -479,13 +481,15 @@ export default function ResultCards({
               <span>{tr("客观事件")}</span>
             </div>
             <p className="muted">{tr(knowledge.reason || "")}</p>
+            {knowledge.guessed?.map(row => <p key={row.id} className="muted">{row.happened_at} {row.event} 答对了，但 30 天内没有另一类事件也答对，可能是蒙对的，没有用来估计范围。</p>)}
             {knowledge.error && <ErrorFold text={knowledge.error} />}
-            {review && review.status !== "not_needed" && review.reason !== "retry_pending" && reviewedRows.length === 0 && <p className="knowledge-note">{boundaryReviewText(review.reason, review.method)}</p>}
+            {preliminaryRange && <p className="knowledge-note">{review.to} 之后 30 天内缺少第二道明确回答「不知道」的题，日期范围尚未确认。</p>}
+            {review && (!preliminaryRange || review.reason === "limit") && review.status !== "not_needed" && review.reason !== "retry_pending" && reviewedRows.length === 0 && <p className="knowledge-note">{boundaryReviewText(review.reason, review.method, knowledgeAskLimit)}</p>}
             {reviewedRows.length > 0 && <div>
               <p className="knowledge-note">
                 {tr("用于核查日期边界的事件")} · {reviewedRows.map(row => `${row.happened_at || row.quarter} ${row.event}`).join("；")}
               </p>
-              <p className="muted">{legacyUnknownPair ? tr("已收到两道题的回答，现有结果还不能确定知识日期边界。") : boundaryReviewText(review?.reason || "", review?.method)}</p>
+              <p className="muted">{legacyUnknownPair ? tr("已收到两道题的回答，现有结果还不能确定知识日期边界。") : boundaryReviewText(review?.reason || "", review?.method, knowledgeAskLimit)}</p>
               <button type="button" className="btn-secondary" onClick={openReviewedEvents}>
                 {reviewedRows.length === 2 ? tr("查看这两道题的回答") : tr("查看这道题的回答")}
               </button>
@@ -498,10 +502,11 @@ export default function ResultCards({
                 {eventRows.map(row => {
                   const mark = knowledgeMark(row, tr);
                   const needsReview = reviewedRows.includes(row);
+                  const guessed = knowledge.guessed?.some(candidate => candidate.id === row.id);
                   return <li key={row.id}>
                     <details className="knowledge-answer" data-item-id={row.id}>
                       <summary title={tr("展开已保存的题目和回答，不重新提问或修改主站。")}>
-                        <b className={mark.cls}>{mark.text}</b>
+                        <b className={mark.cls}>{mark.text}{guessed && <small className="score-chip">可能蒙对</small>}</b>
                         <span>{row.happened_at || row.quarter || "—"}</span>
                         <span>{row.event}{needsReview && <small className="score-chip">{tr(crossYearEstimate ? "估计范围依据" : "边界待核查")}</small>}</span>
                       </summary>

@@ -109,6 +109,7 @@ export interface KnowledgeVerdict {
   attempts?: number;
   thinking_used?: boolean;
   rows?: KnowledgeRow[];
+  guessed?: KnowledgeRow[];
   error?: string;
 }
 export interface IntegrityVerdict {

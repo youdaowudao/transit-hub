@@ -39,9 +39,9 @@ type CrossCheckInjection struct {
 }
 
 type CrossCheckIdentity struct {
-	ItemID, Status string
-	OrderIndex     int
-	Earned, Max    *int64
+	ItemID, Status, Source string
+	OrderIndex             int
+	Earned, Max            *int64
 }
 
 type CrossCheckPeer struct {
@@ -233,14 +233,15 @@ func readCrossCheckInjections(ctx context.Context, tx *sql.Tx, id string) ([]Cro
 
 func readCrossCheckIdentity(ctx context.Context, tx *sql.Tx, id string) (*CrossCheckIdentity, error) {
 	var item CrossCheckIdentity
-	var status, earned, maxPoints projectedJSON
+	var status, earned, maxPoints, source projectedJSON
 	err := tx.QueryRowContext(ctx, `SELECT item_id, order_index,
 		json_type(result_json,'$.judgment.status'), json_extract(result_json,'$.judgment.status'),
 		json_type(result_json,'$.judgment.earned'), json_extract(result_json,'$.judgment.earned'),
-		json_type(result_json,'$.judgment.max'), json_extract(result_json,'$.judgment.max')
+		json_type(result_json,'$.judgment.max'), json_extract(result_json,'$.judgment.max'),
+		json_type(result_json,'$.judgment.source'), json_extract(result_json,'$.judgment.source')
 		FROM hub_items WHERE report_id=? AND json_extract(question_json,'$.definition.judge.type')='model_identity'
 		ORDER BY order_index, item_id LIMIT 1`, id).
-		Scan(&item.ItemID, &item.OrderIndex, &status.kind, &status.value, &earned.kind, &earned.value, &maxPoints.kind, &maxPoints.value)
+		Scan(&item.ItemID, &item.OrderIndex, &status.kind, &status.value, &earned.kind, &earned.value, &maxPoints.kind, &maxPoints.value, &source.kind, &source.value)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -248,6 +249,7 @@ func readCrossCheckIdentity(ctx context.Context, tx *sql.Tx, id string) (*CrossC
 		return nil, err
 	}
 	item.Status, _ = status.stringValue("text")
+	item.Source, _ = source.stringValue("text")
 	item.Earned = earned.integer()
 	item.Max = maxPoints.integer()
 	return &item, nil

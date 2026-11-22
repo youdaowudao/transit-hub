@@ -62,8 +62,8 @@ func Presets() []Definition {
 }
 func Preset(id string) (Definition, bool) {
 	if strings.HasPrefix(id, "knowledge:") {
-		for _, defs := range [][]Definition{CurrentKnowledge(), LegacyKnowledge()} {
-			for _, q := range defs {
+		for _, bank := range []func() []Definition{CurrentKnowledge, PreviousKnowledge, LegacyKnowledge} {
+			for _, q := range bank() {
 				if q.ID == id {
 					return q, true
 				}
@@ -92,7 +92,15 @@ func LegacyKnowledge() []Definition {
 
 // CurrentKnowledge returns the refreshed defaults, placing supplemental dates in existing gaps.
 func CurrentKnowledge() []Definition {
-	anchors := knowledge.CurrentAnchors()
+	return knowledgeDefinitions(knowledge.CurrentAnchors())
+}
+
+// PreviousKnowledge returns the exact v5 defaults and order for migration and saved reports.
+func PreviousKnowledge() []Definition {
+	return knowledgeDefinitions(knowledge.PreviousAnchors())
+}
+
+func knowledgeDefinitions(anchors []knowledge.Probe) []Definition {
 	defs := make([]Definition, 0, len(anchors))
 	nextReplacement, gap := firstKnowledgeOrder, 0
 	for _, p := range anchors {

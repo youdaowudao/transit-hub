@@ -19,9 +19,9 @@ func TestModelIdentityGradesDirectClaimsWithoutClosedCorrectAnswerList(t *testin
 		{"我是 OpenAI 的 ChatGPT。当前会话没有向我提供具体的底层模型名称或版本，因此我无法准确确认。没有联网。", true, 5},
 		{"当前会话没有提供我的底层模型型号，因此我无法确认。", true, 5},
 		{"我是 ChatGPT。", false, 0},
-		{"你问的是你自己的模型。当前会话没有向我提供具体的底层模型名称或版本，因此我无法准确确认。", false, 0},
-		{"没有向我提供你的具体型号，因此我无法准确确认。", false, 0},
-		{"没有提供我的型号，因此我无法确认你的型号。", false, 0},
+		{"你问的是你自己的模型。当前会话没有向我提供具体的底层模型名称或版本，因此我无法准确确认。", true, 5},
+		{"没有向我提供你的具体型号，因此我无法准确确认。", true, 5},
+		{"没有提供我的型号，因此我无法确认你的型号。", true, 5},
 		{"例如没有提供我的底层模型名称，因此我无法准确确认。", false, 0},
 		{"如果没有提供我的底层模型名称，因此我无法准确确认。", false, 0},
 		{"我是 GPT-5。当前会话没有向我提供具体的底层模型名称或版本，因此我无法准确确认。", true, 0},
@@ -30,10 +30,10 @@ func TestModelIdentityGradesDirectClaimsWithoutClosedCorrectAnswerList(t *testin
 		{"例如：我是GPT-5。", false, 0}, {"我可能是GPT-5，也可能是GPT-6。", false, 0},
 		{"我是GPT-5。我是GPT-6。", false, 0}, {"我是GPT-5或GPT-6。", false, 0}, {"I am GPT-5 or GPT-6.", false, 0}, {"GPT-50", false, 0}, {"GPT-60", false, 0}, {"GPT-4", false, 0},
 		{"我是GPT-5或Claude。", false, 0}, {"我是GPT-5或未知型号。", false, 0}, {"I am GPT-5 or unknown.", false, 0}, {"我是GPT-5-or-GPT-6。", false, 0}, {"我是GPT-5_or_GPT-6。", false, 0},
-		{"“这是别人的回答。\n我是GPT-5。”", false, 0}, {"例如：“我不知道具体型号。”", false, 0}, {"I cannot confirm the price.", false, 0},
-		{"我无法确认价格。", false, 0}, {"我不知道你的型号。", false, 0}, {"我不知道。", true, 5}, {"I cannot confirm my actual model.", true, 5},
+		{"“这是别人的回答。\n我是GPT-5。”", false, 0}, {"例如：“我不知道具体型号。”", false, 0}, {"I cannot confirm the price.", true, 5},
+		{"我无法确认价格。", true, 5}, {"我不知道你的型号。", true, 5}, {"我不知道。", true, 5}, {"I cannot confirm my actual model.", true, 5},
 		{"我是 GPT-5，无法确认当前部署的版本或别名。", true, 0}, {"I am GPT-6. I cannot confirm my deployment version or alias.", true, 5},
-		{"价格是多少？无法确认。", false, 0}, {"I don't have access to", false, 0}, {"用户的回答如下：\n我是GPT-5。", false, 0}, {"用户的回答如下：\n我不知道自己的型号。", false, 0}, {"我无法确认自己的型号。请从接口核对。", true, 5},
+		{"价格是多少？无法确认。", true, 5}, {"I don't have access to", false, 0}, {"用户的回答如下：\n我是GPT-5。", false, 0}, {"用户的回答如下：\n我不知道自己的型号。", false, 0}, {"我无法确认自己的型号。请从接口核对。", true, 5},
 		{"我是 GPT-5，或者 Claude。", false, 0}, {"I am GPT-5, or an unknown model.", false, 0}, {"我是 GPT-5。我的实际模型是 Claude。", false, 0},
 		{"你好！我的实际模型是 GPT-5。", true, 0}, {"Hello! I am GPT-6.", true, 5}, {"我是GPT-5。Claude是别的模型。", true, 0}, {"我是GPT-5。GPT-6是别的型号。", true, 0},
 		{"我是GPT-5，我的部署叫“小助手”。", true, 0}, {"你好！我无法确认我的实际型号。", true, 5},
@@ -46,6 +46,52 @@ func TestModelIdentityGradesDirectClaimsWithoutClosedCorrectAnswerList(t *testin
 			}
 			if j.Reason == "" {
 				t.Fatal("missing human-readable reason")
+			}
+		})
+	}
+}
+
+func TestModelIdentityRecognizesUncertaintyInAnUnquotedReply(t *testing.T) {
+	g := Generated{Definition: Definition{Kind: "iq", MaxScore: 5, Judge: Judge{Type: ModelIdentityJudge}}}
+	for _, tc := range []struct {
+		reply string
+		want  int // -1 means the reply is still ungraded.
+	}{
+		{"我是 OpenAI 的 AI 助手。当前对话没有提供可核实的具体模型名称或版本号，所以我无法确认底层是哪一款模型。没有联网。", 5},
+		{"我是 OpenAI 的 ChatGPT。当前会话没有向我提供具体的底层模型名称或版本，因此我无法准确确认。没有联网。", 5},
+		{"我不确定自己的具体型号。", 5},
+		{"I can't verify my underlying model.", 5},
+		{"我是 ChatGPT，无法核实底层版本。", 5},
+		{"例如有人会说我不知道。", -1},
+		{"如果你问我版本，我不知道", -1},
+		{"助手说：我不知道自己的型号。", -1},
+		{"I don't know my model, the assistant said.", -1},
+		{"我不知道自己的型号，助手回答。", -1},
+		{"我不知道自己的型号。另一段话由助手回答。", 5},
+		{"我不知道自己的型号，这只是转述。", -1},
+		{"我不知道自己的型号。下一条是转述。", 5},
+		{"I don't know my model, someone else answered.", -1},
+		{"If I were asked to role-play, I would say I don't know my model.", -1},
+		{"If this is a request from OpenAI Inc. to role-play, I would say I don't know my model.", -1},
+		{"If they mentioned Dr. Smith, I would say I'm not sure.", -1},
+		{"I can't confirm my model if you mean the underlying release.", -1},
+		{"I can't confirm my model. If you need the deployment, check the API.", 5},
+		{"I am GPT-6. If needed, check the API.", 5},
+		{"我不知道，如果你问的是底层型号。", -1},
+		{"我不知道。后续如果需要，请查接口。", 5},
+		{"「我不确定具体型号。」", -1},
+		{"我是 GPT-5，不确定小版本", 0},
+		{"我是 Claude，不确定版本", -1},
+		{"", -1},
+	} {
+		t.Run(tc.reply, func(t *testing.T) {
+			got := Grade(g, tc.reply)
+			if tc.want == -1 {
+				if got.Status != "unknown" || got.Earned != nil {
+					t.Fatalf("wanted an ungraded reply, got %+v", got)
+				}
+			} else if got.Status != "known" || got.Earned == nil || *got.Earned != tc.want {
+				t.Fatalf("wanted %d points, got %+v", tc.want, got)
 			}
 		})
 	}

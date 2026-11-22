@@ -36,6 +36,26 @@ func loadKnowledgeProjection(t *testing.T, report store.Report) knowledge.Verdic
 	return saved.Knowledge
 }
 
+func TestV5SubsetRetryPreservesSavedObservationOrder(t *testing.T) {
+	previous := map[string]any{"rows": []any{
+		map[string]any{"id": "virginia_2025_governor"},
+		map[string]any{"id": "open_2025_golf"},
+	}}
+	rows := []knowledge.Row{
+		{ID: "worldcup_2026_france_paraguay"},
+		{ID: "oscars_2026_picture"},
+		{ID: "open_2025_golf"},
+		{ID: "virginia_2025_governor"},
+	}
+	orderKnowledgeRows(rows, previous)
+	want := []string{"virginia_2025_governor", "open_2025_golf", "oscars_2026_picture", "worldcup_2026_france_paraguay"}
+	for i, row := range rows {
+		if row.ID != want[i] {
+			t.Fatalf("row %d is %s, want %s (all rows: %+v)", i, row.ID, want[i], rows)
+		}
+	}
+}
+
 func TestKnowledgeAsksAcrossYearsBeforeNarrowingAfterUnknown(t *testing.T) {
 	for _, model := range []string{"gpt-6.1-sol", "fixture"} {
 		t.Run(model, func(t *testing.T) {
@@ -66,9 +86,9 @@ func TestKnowledgeAsksAcrossYearsBeforeNarrowingAfterUnknown(t *testing.T) {
 			if err = RunOne(t.Context(), s, owner, id, credential, Config{DisableBankSync: true, Transport: transport}); err != nil {
 				t.Fatal(err)
 			}
-			want := []string{"2025-11-04", "2026-01-31", "2026-04-12"}
-			if len(asked) < len(want) || len(asked) > 10 || !reflect.DeepEqual(asked[:len(want)], want) {
-				t.Fatalf("asked %v, want to start with %v within the 10-question budget", asked, want)
+			want := []string{"2025-11-04", "2026-01-18", "2026-04-18"}
+			if len(asked) < len(want) || len(asked) > 16 || !reflect.DeepEqual(asked[:len(want)], want) {
+				t.Fatalf("asked %v, want to start with %v within the 16-question budget", asked, want)
 			}
 			report, err := s.Report(t.Context(), owner, id)
 			if err != nil {
@@ -82,8 +102,9 @@ func TestKnowledgeAsksAcrossYearsBeforeNarrowingAfterUnknown(t *testing.T) {
 				t.Fatal(err)
 			}
 			k := summary.Knowledge
-			if !reflect.DeepEqual(k, summary.Verdict.Knowledge) || k.Label != "知识截止日期未确认" || k.Cutoff != "" ||
-				k.Status != "unknown" || k.BoundaryReview == nil || k.BoundaryReview.From != "" || k.BoundaryReview.To != "" || len(k.Rows) != len(asked) {
+			if !reflect.DeepEqual(k, summary.Verdict.Knowledge) || k.Label != "初步区间 2025-10-21 至 2025-11-04" || k.Cutoff != "" ||
+				k.Status != "unknown" || k.BoundaryReview == nil || k.BoundaryReview.Status != "unconfirmed" ||
+				k.BoundaryReview.From != "2025-10-21" || k.BoundaryReview.To != "2025-11-04" || len(k.Rows) != len(asked) {
 				t.Fatalf("unsupported date range or divergent saved observations: %+v", summary)
 			}
 		})
@@ -96,22 +117,120 @@ func TestRotatedKnowledgeUsesSerial2026Midpoints(t *testing.T) {
 	t.Run("oversized answer preserves other events", func(t *testing.T) { testRotatedKnowledgeSerial(t, false, true) })
 }
 
-func testRotatedKnowledgeSerial(t *testing.T, legacy, oversized bool) {
+func seedV5Knowledge(t *testing.T, s *store.Store, owner store.Owner, bank []questions.Definition) {
 	t.Helper()
-	ids := []string{}
-	for _, q := range questions.Presets() {
-		if q.Kind == "knowledge" {
-			ids = append(ids, q.ID)
+	if _, err := s.RuntimeDB().ExecContext(t.Context(), `DELETE FROM hub_questions
+		WHERE user_id=? AND workspace_id=? AND json_extract(definition_json,'$.kind')='knowledge'`, owner.UserID, owner.WorkspaceID); err != nil {
+		t.Fatal(err)
+	}
+	for _, q := range bank {
+		raw, err := json.Marshal(q)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err = s.RuntimeDB().ExecContext(t.Context(), `INSERT INTO hub_questions VALUES(?,?,?,?,1)`,
+			owner.UserID, owner.WorkspaceID, q.ID, string(raw)); err != nil {
+			t.Fatal(err)
 		}
 	}
-	if len(ids) != 24 {
-		t.Fatalf("default bank has %d events, want 24", len(ids))
+}
+
+func TestV5CrossYearReportRetainsItsMethodOnRunAndRetry(t *testing.T) {
+	bank := questions.PreviousKnowledge()
+	ids := make([]string, 0, len(bank))
+	for _, q := range bank {
+		ids = append(ids, q.ID)
 	}
-	const editedID = "knowledge:ao_2026_women"
-	const title = "只修改标题的澳网题"
+	s, owner, id, cred := setupReport(t, ids, "chat", func(s *store.Store, owner store.Owner) { seedV5Knowledge(t, s, owner, bank) })
+	marker := `{"knowledge":{"boundary_review":{"method":"cross_year","reason":"no_anchor"}}}`
+	if _, err := s.RuntimeDB().ExecContext(t.Context(), `UPDATE hub_reports SET summary_json=? WHERE report_id=?`, marker, id); err != nil {
+		t.Fatal(err)
+	}
+	_, snapshot, err := s.LoadRun(t.Context(), owner, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	byPrompt := make(map[string]questions.Generated)
+	for _, question := range snapshot.Questions {
+		byPrompt[question.Prompt] = question
+	}
+	const failedID = "knowledge:hungary_2026_vote"
+	var asked []string
+	retrying := false
+	fake := fixtureTransport(func(r *http.Request) (*http.Response, error) {
+		prompt, _ := requestPrompt(t, r)
+		q, ok := byPrompt[prompt]
+		if !ok {
+			t.Fatal("sent an event outside the v5 snapshot")
+		}
+		asked = append(asked, q.Definition.ID)
+		switch q.Definition.ID {
+		case "knowledge:virginia_2025_governor", "knowledge:ao_2026_women":
+			return fixtureResponse(r, fmt.Sprintf(`{"choice":%q}`, q.Expected)), nil
+		case failedID:
+			if retrying {
+				return fixtureResponse(r, `{"choice":"D"}`), nil
+			}
+			return fixtureResponse(r, ""), nil
+		default:
+			wrong := "A"
+			if q.Expected == wrong {
+				wrong = "B"
+			}
+			return fixtureResponse(r, fmt.Sprintf(`{"choice":%q}`, wrong)), nil
+		}
+	})
+	cfg := Config{DisableBankSync: true, Transport: fake}
+	if err = RunOne(t.Context(), s, owner, id, cred, cfg); err != nil {
+		t.Fatal(err)
+	}
+	before, err := s.Report(t.Context(), owner, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	v := loadKnowledgeProjection(t, before)
+	opening := []string{"knowledge:virginia_2025_governor", "knowledge:ao_2026_women", failedID}
+	if len(asked) != 10 || !reflect.DeepEqual(asked[:len(opening)], opening) || v.BoundaryReview == nil || v.BoundaryReview.Method != knowledge.CrossYearMethod || v.BoundaryReview.Reason != "main_error" || v.Cutoff != "" {
+		t.Fatalf("v5 first run did not retain its saved method and 10-question cap: asked=%v, result=%+v", asked, v)
+	}
+	if _, err = s.RetryReport(t.Context(), owner, store.RetryRequest{ReportID: id, RetryID: strings.Repeat("c", 32), ItemIDs: []string{failedID}}); err != nil {
+		t.Fatal(err)
+	}
+	asked, retrying = nil, true
+	if err = RunOne(t.Context(), s, owner, id, cred, cfg); err != nil {
+		t.Fatal(err)
+	}
+	after, err := s.Report(t.Context(), owner, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	v = loadKnowledgeProjection(t, after)
+	if !reflect.DeepEqual(asked, []string{failedID}) || v.BoundaryReview == nil || v.BoundaryReview.Method != knowledge.CrossYearMethod || v.BoundaryReview.Reason != "no_question" || v.Cutoff != "" || v.BoundaryReview.To != "" {
+		t.Fatalf("retry changed the historical method or confirmed an unsupported interval: asked=%v, result=%+v", asked, v)
+	}
+}
+
+func testRotatedKnowledgeSerial(t *testing.T, legacy, oversized bool) {
+	t.Helper()
+	bank := questions.CurrentKnowledge()
+	wantBank := 27
+	if legacy {
+		bank = questions.PreviousKnowledge()
+		wantBank = 24
+	}
+	ids := make([]string, 0, len(bank))
+	for _, q := range bank {
+		ids = append(ids, q.ID)
+	}
+	if len(ids) != wantBank {
+		t.Fatalf("default bank has %d events, want %d", len(ids), wantBank)
+	}
+	const editedID = "knowledge:afcon_2026_goal"
+	const title = "只修改标题的非洲杯题"
 	const order = 99800
 	s, o, id, cred := setupReport(t, ids, "chat", func(s *store.Store, owner store.Owner) {
 		if legacy {
+			seedV5Knowledge(t, s, owner, bank)
 			return
 		}
 		q, err := s.Question(t.Context(), owner, editedID)
@@ -164,7 +283,8 @@ func testRotatedKnowledgeSerial(t *testing.T, legacy, oversized bool) {
 	want := []string{"2025-11-04", "2026-02-22", "2026-07-19", "2026-07-04", "2026-04-26", "2026-05-30", "2026-05-16", "2026-05-20"}
 	skipReason := "串行二分按已经取得的回答继续选题，本轮未选到这道题；不算答错。"
 	if !legacy {
-		want = []string{"2025-11-04", "2026-01-31", "2026-04-12", "2026-05-30", "2026-06-17", "2026-04-26", "2026-05-16", "2026-05-20"}
+		// The April 6 science result already supports the March 11 public affairs result.
+		want = []string{"2025-11-04", "2026-01-18", "2026-04-18", "2026-04-06", "2026-01-24", "2026-02-08", "2026-03-11", "2026-06-12", "2026-07-04", "2026-05-17"}
 		skipReason = "本轮根据已取得的回答选择了其他题目。这道题未提问，不算答错。"
 	}
 	if !reflect.DeepEqual(requested, want) {
@@ -184,7 +304,7 @@ func testRotatedKnowledgeSerial(t *testing.T, legacy, oversized bool) {
 	if !legacy {
 		review := summary.Knowledge.BoundaryReview
 		if review == nil || review.Method != knowledge.CrossYearMethod || review.Status != "two_unknown" ||
-			review.From != "2026-05-16" || review.To != "2026-05-20" || review.CheckID != "ucl_2026_final" {
+			review.From != "2026-05-17" || review.To != "2026-06-12" || review.CheckID != "worldcup_2026_france_paraguay" {
 			t.Fatalf("range was not based on the two later responses: %+v", review)
 		}
 	}
@@ -233,18 +353,18 @@ func testRotatedKnowledgeSerial(t *testing.T, legacy, oversized bool) {
 			break
 		}
 	}
-	if skipped != 16 {
-		t.Fatalf("saved %d skipped questions, want 16", skipped)
+	if wantSkipped := wantBank - len(want); skipped != wantSkipped {
+		t.Fatalf("saved %d skipped questions, want %d", skipped, wantSkipped)
 	}
 }
 
 func TestEditedKnowledgeAndOriginalJSONUseTheirFrozenJudgments(t *testing.T) {
-	edited, _ := questions.Preset("knowledge:ao_2026_women")
+	edited, _ := questions.Preset("knowledge:afcon_2026_goal")
 	edited.Parameters["date"] = "2026-02-01"
 	options := edited.Parameters["choices"].([]any)
 	options[0].(map[string]any)["kind"] = "wrong"
 	options[1].(map[string]any)["kind"] = "know"
-	builtIn, _ := questions.Preset("knowledge:milano_2026_men_skate")
+	builtIn, _ := questions.Preset("knowledge:superbowl_2026_score")
 	s, owner, id, credential := configuredReport(t, []questions.Definition{edited, builtIn}, "fixture")
 	transport := fixtureTransport(func(r *http.Request) (*http.Response, error) {
 		prompt, _ := requestPrompt(t, r)
@@ -274,7 +394,7 @@ func TestEditedKnowledgeAndOriginalJSONUseTheirFrozenJudgments(t *testing.T) {
 		t.Fatal(err)
 	}
 	got := saved.Knowledge
-	if got.Status != "custom" || len(got.Rows) != 1 || got.Rows[0].ID != "milano_2026_men_skate" || got.Rows[0].Kind != "know" {
+	if got.Status != "custom" || len(got.Rows) != 1 || got.Rows[0].ID != "superbowl_2026_score" || got.Rows[0].Kind != "know" {
 		t.Errorf("edited question received a false built-in judgement: %+v", got)
 	}
 	if len(got.Observations) != 2 || got.Observations[0].ID != edited.ID || got.Observations[0].Date != "2026-02-01" || got.Observations[0].Kind != "know" ||
@@ -403,7 +523,7 @@ func TestCrossYearEstimateIsPublishedOnlyAtFinish(t *testing.T) {
 				t.Fatal("lost initial report method")
 			}
 			if mode == "partial" {
-				if got.BoundaryReview.To != "2026-05-20" || got.Status != "estimated" {
+				if got.BoundaryReview.To != "2026-06-12" || got.Status != "estimated" {
 					t.Fatalf("unrelated failure suppressed valid evidence: %+v", got)
 				}
 			} else {
@@ -413,8 +533,8 @@ func TestCrossYearEstimateIsPublishedOnlyAtFinish(t *testing.T) {
 				var count int
 				err = s.RuntimeDB().QueryRowContext(t.Context(), `SELECT count(*) FROM hub_items
 					WHERE report_id=? AND section_id='knowledge' AND json_extract(result_json,'$.evidence.row.id') IS NOT NULL`, id).Scan(&count)
-				if err != nil || count != 8 {
-					t.Fatalf("already saved observations=%d, error %v; want 8", count, err)
+				if err != nil || count != 10 {
+					t.Fatalf("already saved observations=%d, error %v; want 10", count, err)
 				}
 			}
 		})
@@ -428,7 +548,7 @@ func TestCrossYearStopPreservesOnlySavedStatistics(t *testing.T) {
 	}{
 		{"before the knowledge worker starts", 0},
 		{"before beginning the next question", 1},
-		{"while saving skipped items", 8},
+		{"while saving skipped items", 10},
 	} {
 		t.Run(tc.when, func(t *testing.T) {
 			ctx, cancel := context.WithCancel(t.Context())
@@ -465,7 +585,7 @@ func TestCrossYearStopPreservesOnlySavedStatistics(t *testing.T) {
 				trigger := `AFTER UPDATE OF result_json ON hub_items WHEN json_extract(NEW.result_json,'$.judgment.status')='not_asked'
 					BEGIN SELECT ` + callback + `(); END`
 				if tc.want == 1 {
-					trigger = `BEFORE UPDATE OF status ON hub_items WHEN NEW.item_id='knowledge:ao_2026_women' AND NEW.status='running'
+					trigger = `BEFORE UPDATE OF status ON hub_items WHEN NEW.item_id='knowledge:afcon_2026_goal' AND NEW.status='running'
 						BEGIN SELECT ` + callback + `(); SELECT RAISE(ABORT, 'fixture cancelled before starting the next item'); END`
 				}
 				_, err = s.RuntimeDB().ExecContext(t.Context(), `CREATE TRIGGER cancel_knowledge `+trigger)
@@ -513,7 +633,7 @@ func TestCrossYearStopPreservesOnlySavedStatistics(t *testing.T) {
 	}
 }
 
-func TestCrossYearSavesTenQuestionBudgetAndTruncatedOrInvalidReplies(t *testing.T) {
+func TestCrossYearSavesSixteenQuestionBudgetAndTruncatedOrInvalidReplies(t *testing.T) {
 	for _, mode := range []string{"wrong", "truncated", "invalid"} {
 		t.Run(mode, func(t *testing.T) {
 			s, owner, id, cred := configuredReport(t, questions.CurrentKnowledge(), "fixture")
@@ -560,7 +680,7 @@ func TestCrossYearSavesTenQuestionBudgetAndTruncatedOrInvalidReplies(t *testing.
 				t.Fatal(err)
 			}
 			got := loadKnowledgeProjection(t, report)
-			limit := 10
+			limit := 16
 			if mode == "invalid" {
 				limit = 1
 			}
@@ -596,7 +716,7 @@ func TestCrossYearRetriesOnlyTheFailedObservationAndRecomputesTheRange(t *testin
 	for _, q := range snap.Questions {
 		byPrompt[q.Prompt] = q
 	}
-	const failedID = "knowledge:ao_2026_women"
+	const failedID = "knowledge:afcon_2026_goal"
 	var retried []string
 	retry := false
 	retryFails := true
@@ -667,7 +787,7 @@ func TestCrossYearRetriesOnlyTheFailedObservationAndRecomputesTheRange(t *testin
 	}
 	got := loadKnowledgeProjection(t, after)
 	if after.Status != "done" || !reflect.DeepEqual(retried, []string{failedID}) ||
-		got.Rows[1].Kind != "know" || len(got.Rows) != len(first.Rows) || got.BoundaryReview.To != "2026-05-20" {
+		got.Rows[1].Kind != "know" || len(got.Rows) != len(first.Rows) || got.BoundaryReview.To != "2026-06-12" {
 		t.Fatalf("retry=%v, report=%s, observations=%+v", retried, after.Status, got)
 	}
 }
@@ -685,9 +805,9 @@ func TestCrossYearRetryDoesNotReuseQueuedOldAnswers(t *testing.T) {
 	for _, q := range snap.Questions {
 		byPrompt[q.Prompt] = q
 	}
-	const invalidID = "knowledge:ao_2026_women"
+	const invalidID = "knowledge:afcon_2026_goal"
 	const failedID = "knowledge:virginia_2025_governor"
-	const otherID = "knowledge:hungary_2026_vote"
+	const otherID = "knowledge:hungary_2026_final_seats"
 	fake := fixtureTransport(func(r *http.Request) (*http.Response, error) {
 		prompt, _ := requestPrompt(t, r)
 		q := byPrompt[prompt]

@@ -16,7 +16,7 @@ import (
 
 // Complete built-in catalogues use the original serial request loop. The
 // observers only attach item ownership, attempts and storage.
-func originalKnowledge(ctx context.Context, s *store.Store, o store.Owner, id string, defs []questions.Generated, allDefs []questions.Generated, previous map[string]any, crossYear bool, g gateway.Client, timeout int, model string, retry *store.Retry, execute func(questions.Generated) (itemResult, error), results map[string]itemResult, mu *sync.Mutex, fail func(error), notify func(string, map[string]any)) (map[string]any, error) {
+func originalKnowledge(ctx context.Context, s *store.Store, o store.Owner, id string, defs []questions.Generated, allDefs []questions.Generated, previous map[string]any, crossYear, previousCrossYear bool, g gateway.Client, timeout int, model string, retry *store.Retry, execute func(questions.Generated) (itemResult, error), results map[string]itemResult, mu *sync.Mutex, fail func(error), notify func(string, map[string]any)) (map[string]any, error) {
 	byPrompt := map[string]questions.Generated{}
 	byID := map[string]bool{}
 	for _, q := range defs {
@@ -28,9 +28,13 @@ func originalKnowledge(ctx context.Context, s *store.Store, o store.Owner, id st
 	}
 	var verdict knowledge.Verdict
 	var executionErr error
+	fromCrossYearRows := knowledge.CrossYearFromRows
+	if previousCrossYear {
+		fromCrossYearRows = knowledge.PreviousCrossYearFromRows
+	}
 	complete := retry == nil && len(byPrompt) == len(defs)
 	// Earlier releases stored the same old definitions with a different prompt format.
-	current := complete && (crossYear || questions.MatchesCurrentKnowledge(defs))
+	current := complete && (crossYear || questions.MatchesPreviousKnowledge(defs))
 	if (!hasCrossYearMethod(previous) || crossYear) && (current || (complete && matchesKnowledgeBank(byID, knowledge.Anchors))) {
 		check := knowledge.Check
 		skipReason := "原版知识探针按已取得的回答继续选题，本轮没有选到此题；不作为答错"
@@ -44,6 +48,9 @@ func originalKnowledge(ctx context.Context, s *store.Store, o store.Owner, id st
 		}
 		if crossYear {
 			check = knowledge.CheckCrossYear
+			if previousCrossYear {
+				check = knowledge.CheckPreviousCrossYear
+			}
 			skipReason = "本轮根据已取得的回答选择了其他题目。这道题未提问，不算答错。"
 		}
 		roundDate := time.Now().UTC().Format("2006-01-02")
@@ -121,7 +128,7 @@ func originalKnowledge(ctx context.Context, s *store.Store, o store.Owner, id st
 				}
 			}
 			mu.Unlock()
-			verdict = knowledge.InterruptCrossYear(knowledge.CrossYearFromRows(saved, verdict.Protocol, verdict.Attempts))
+			verdict = knowledge.InterruptCrossYear(fromCrossYearRows(saved, verdict.Protocol, verdict.Attempts))
 			return asMap(verdict), ctx.Err()
 		}
 		if err != nil && ctx.Err() != nil {
@@ -223,7 +230,7 @@ func originalKnowledge(ctx context.Context, s *store.Store, o store.Owner, id st
 		// Preserve the original saved row order; retry replaces only the chosen row.
 		orderKnowledgeRows(rows, previous)
 		if crossYear {
-			verdict = knowledge.CrossYearFromRows(rows, g.ProtocolFor(model), attempts)
+			verdict = fromCrossYearRows(rows, g.ProtocolFor(model), attempts)
 		} else {
 			verdict = knowledge.FromRows(rows, g.ProtocolFor(model), attempts)
 			if !hasCrossYearMethod(previous) {
@@ -265,10 +272,20 @@ func orderKnowledgeRows(rows []knowledge.Row, previous map[string]any) {
 	index := map[string]int{}
 	oldRows, _ := previous["rows"].([]any)
 	next := len(oldRows)
-	for _, bank := range [][]knowledge.Probe{knowledge.Anchors, knowledge.CurrentAnchors()} {
+	// A saved subset can include retired defaults without matching the complete v5 bank.
+	anchors := append(knowledge.PreviousAnchors(), knowledge.CurrentAnchors()...)
+	sort.Slice(anchors, func(i, j int) bool {
+		if anchors[i].HappenedAt != anchors[j].HappenedAt {
+			return anchors[i].HappenedAt < anchors[j].HappenedAt
+		}
+		return anchors[i].ID < anchors[j].ID
+	})
+	for _, bank := range [][]knowledge.Probe{knowledge.Anchors, anchors} {
 		for _, p := range bank {
-			index[p.ID] = next
-			next++
+			if _, exists := index[p.ID]; !exists {
+				index[p.ID] = next
+				next++
+			}
 		}
 	}
 	for i, value := range oldRows {
@@ -276,5 +293,12 @@ func orderKnowledgeRows(rows []knowledge.Row, previous map[string]any) {
 			index[id] = i
 		}
 	}
-	sort.SliceStable(rows, func(i, j int) bool { return index[rows[i].ID] < index[rows[j].ID] })
+	sort.SliceStable(rows, func(i, j int) bool {
+		left, leftFound := index[rows[i].ID]
+		right, rightFound := index[rows[j].ID]
+		if leftFound != rightFound {
+			return leftFound
+		}
+		return left < right
+	})
 }

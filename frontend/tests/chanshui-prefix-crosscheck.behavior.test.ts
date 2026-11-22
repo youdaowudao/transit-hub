@@ -637,6 +637,17 @@ const group = (overhead: number, match: typeof gpt55, sameAsReference = false) =
 })
 
 describe('判读合成边界', () => {
+  it.each([0, 5])('人工判定 %d 分以人工方式显示，禁止推断模型自称 GPT-5', async earned => {
+    const v = sample()
+    v.data = { ...v.data, reference: null, groups: null, codes: [], grade: 'E', selfReport: {
+      present: true, status: 'known', earned, itemId: 'Q10', max: 5, byPrompt: false, source: 'manual',
+    } }
+    await render(v, vi.fn().mockResolvedValue(v.data))
+    expect(text()).toContain(earned === 0 ? '模型自报：人工判为不通过' : '模型自报：人工判为通过')
+    expect(text()).not.toContain('回答自称 GPT-5')
+    expect(checkLines(v.data).some(line => line.code === 'self.gpt5')).toBe(false)
+  })
+
   it('26 参考值未知不掩盖相差 5 token 的唯一分组匹配', async () => {
     const v = sample()
     v.data = { ...v.data, grade: 'C', codes: ['prompt_mismatch'],

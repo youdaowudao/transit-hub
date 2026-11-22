@@ -1,5 +1,10 @@
 package knowledge
 
+import (
+	"cmp"
+	"slices"
+)
+
 type currentEvent struct {
 	Probe
 	replaces string
@@ -19,8 +24,8 @@ func event(id, replaces, date, title, question string, correct rune, first, seco
 	return currentEvent{Probe: Probe{ID: id, HappenedAt: date, Event: title, Question: question, Choices: choices}, replaces: replaces}
 }
 
-// currentEvents is in date order. The first version remains available for saved reports.
-var currentEvents = []currentEvent{
+// previousEvents is the v5 default bank in date order, used by saved reports and migrations.
+var previousEvents = []currentEvent{
 	event("ao_2025_zverev", "trump", "2025-01-24", "澳网男单半决赛", "2025年澳大利亚网球公开赛男单半决赛，德约科维奇退赛后，从这场比赛晋级决赛的是谁？", 'B',
 		"扬尼克·辛纳", "亚历山大·兹维列夫", "本·谢尔顿"),
 	event("icc_2025_india", "germany", "2025-02-23", "冠军杯印度对巴基斯坦", "2025年2月23日，国际板球理事会冠军杯印度对巴基斯坦的小组赛结果是什么？", 'C',
@@ -71,6 +76,67 @@ var currentEvents = []currentEvent{
 		"哈里·凯恩", "基利安·姆巴佩", "利昂内尔·梅西"),
 }
 
+var eventReplacements = map[string]currentEvent{
+	"tariffs_2025_april": event("us_2025_tariff_pause", "", "2025-04-09", "美国对等关税暂缓", "2025年4月9日，美国公布对多方贸易伙伴的额外对等关税暂缓安排。公布的暂缓周期是多久？", 'C',
+		"30天", "60天", "90天"),
+	"imf_2025_april_weo": event("canada_2025_election", "", "2025-04-28", "加拿大联邦大选", "2025年4月28日加拿大联邦大选结束后，哪一政党取得最多下议院席位，但没有获得过半席位？", 'A',
+		"自由党", "保守党", "新民主党"),
+	"czech_2025_chamber": event("nobel_2025_peace", "", "2025-10-10", "诺贝尔和平奖", "2025年10月10日，挪威诺贝尔委员会公布当年诺贝尔和平奖。获奖者是谁？", 'B',
+		"安东尼奥·古特雷斯", "玛丽亚·科里娜·马查多", "斯维特兰娜·季哈诺夫斯卡娅"),
+	"bolivia_2025_runoff": event("japan_2025_diet", "", "2025-10-21", "日本国会首相选举", "2025年10月21日，日本国会选出谁担任该国首位女性首相？", 'C',
+		"小池百合子", "上川阳子", "高市早苗"),
+	"ao_2026_women": event("afcon_2026_goal", "", "2026-01-18", "非洲杯决赛进球", "2026年1月18日在拉巴特进行的非洲杯决赛中，谁在加时赛打进了当晚场上的唯一进球？", 'B',
+		"萨迪奥·马内", "帕佩·盖耶", "布拉伊姆·迪亚斯"),
+	"milano_2026_men_skate": event("superbowl_2026_score", "", "2026-02-08", "第60届超级碗", "2026年2月8日，第60届超级碗结束时，西雅图海鹰与新英格兰爱国者的比分是什么？", 'C',
+		"海鹰以27比17获胜", "爱国者以23比20获胜", "海鹰以29比13获胜"),
+	"milano_2026_men_hockey": event("milano_2026_gold_count", "", "2026-02-22", "冬奥会挪威金牌数", "2026年2月22日米兰-科尔蒂纳冬奥会闭幕后，位列金牌榜首位的挪威队获得了多少枚金牌？", 'B',
+		"16枚", "18枚", "20枚"),
+	"oscars_2026_picture": event("oscars_2026_cinematography", "", "2026-03-15", "奥斯卡最佳摄影", "2026年3月15日，第98届奥斯卡颁奖礼上，哪部电影获得最佳摄影奖？", 'B',
+		"《一战再战》（One Battle After Another）", "《罪人》（Sinners）", "《火车梦》（Train Dreams）"),
+	"hungary_2026_vote": event("hungary_2026_final_seats", "", "2026-04-18", "匈牙利国会选举最终席位", "2026年4月18日，匈牙利公布国会选举的最终计票结果。蒂萨党在总计199席中获得多少席？", 'C',
+		"134席", "138席", "141席"),
+	"london_2026_marathon": event("artemis_2026_crater", "", "2026-04-06", "阿耳忒弥斯二号陨石坑命名", "2026年4月6日，阿耳忒弥斯二号乘组为两处月球陨石坑提议名字。除了 Integrity，另一处提议名称是什么？", 'C',
+		"Ellie", "Katie", "Carroll"),
+	"eurovision_2026_final": event("hondius_2026", "", "2026-05-02", "邮轮病例通报", "2026年5月2日，世界卫生组织收到邮轮上出现乘客重症病例的通报，后来检出汉坦病毒。涉事船只是哪一艘？", 'B',
+		"Plancius", "Hondius", "Ortelius"),
+	"europa_2026_final": event("kentucky_2026_derby", "", "2026-05-02", "肯塔基德比冠军", "2026年5月2日肯塔基德比，哪匹马在终点前反超并夺冠？", 'B',
+		"Renegade", "Golden Tempo", "Ocelli"),
+	"ucl_2026_final": event("pga_2026_winner", "", "2026-05-17", "美国 PGA 锦标赛", "2026年5月17日在阿罗尼明克结束的美国 PGA 锦标赛中，哪位球员赢得冠军？", 'B',
+		"琼·拉姆", "亚伦·拉伊", "亚历克斯·斯莫利"),
+	"g7_2026_minerals": event("spacex_2026_first_trade", "", "2026-06-12", "SpaceX 首次公开交易", "2026年6月12日，SpaceX 在纳斯达克开始公开交易时的首笔成交价是多少？", 'B',
+		"每股135美元", "每股150美元", "每股165美元"),
+	"worldcup_2026_boot": event("worldcup_2026_final_goal", "", "2026-07-19", "男足世界杯决赛", "2026年7月19日举行的男足世界杯决赛，谁打进了该场比赛唯一的进球？", 'C',
+		"米克尔·奥亚萨瓦尔", "拉明·亚马尔", "费兰·托雷斯"),
+}
+
+var monthlySupplements = []currentEvent{
+	event("minnesota_2026_pretti", "", "2026-01-24", "亚历克斯·普雷蒂的职业", "2026年1月24日，美国明尼阿波利斯发生致命枪击。遇难者亚历克斯·普雷蒂生前从事什么工作？", 'C',
+		"急诊科医生", "救护车驾驶员", "重症监护室护士"),
+	event("wbd_2026_bid", "", "2026-02-26", "华纳兄弟探索收购报价", "2026年2月26日，华纳兄弟探索董事会认定派拉蒙天舞的新收购报价更优。该报价是每股多少美元？", 'A',
+		"31美元", "29美元", "33美元"),
+	event("iea_2026_reserves", "", "2026-03-11", "国际能源署应急石油储备", "2026年3月11日，国际能源署成员国决定从应急储备中释放多少桶石油？", 'C',
+		"2亿桶", "3亿桶", "4亿桶"),
+}
+
+var currentEvents = func() []currentEvent {
+	out := make([]currentEvent, 0, len(previousEvents)+len(monthlySupplements))
+	for _, e := range previousEvents {
+		if replacement, ok := eventReplacements[e.ID]; ok {
+			replacement.replaces = e.replaces
+			e = replacement
+		}
+		out = append(out, e)
+	}
+	out = append(out, monthlySupplements...)
+	slices.SortFunc(out, func(a, b currentEvent) int {
+		if byDate := cmp.Compare(a.HappenedAt, b.HappenedAt); byDate != 0 {
+			return byDate
+		}
+		return cmp.Compare(a.ID, b.ID)
+	})
+	return out
+}()
+
 // CurrentAnchors returns the current Hub defaults in date order.
 func CurrentAnchors() []Probe {
 	out := make([]Probe, 0, len(currentEvents))
@@ -80,18 +146,54 @@ func CurrentAnchors() []Probe {
 	return out
 }
 
-// IsSupplement distinguishes later additions from replacements in the original search tree.
-func IsSupplement(id string) bool {
-	for _, e := range currentEvents {
+// ReplacedAnchorID returns the v5 ID replaced by a v6 default.
+func ReplacedAnchorID(id string) (string, bool) {
+	for oldID, replacement := range eventReplacements {
+		if replacement.ID == id {
+			return oldID, true
+		}
+	}
+	return "", false
+}
+
+// IsMonthlySupplement identifies the new defaults installed by the v6 migration.
+func IsMonthlySupplement(id string) bool {
+	for _, e := range monthlySupplements {
 		if e.ID == id {
-			return e.replaces == ""
+			return true
 		}
 	}
 	return false
 }
 
+// PreviousAnchors keeps the original 10-question search on its own bank.
+func PreviousAnchors() []Probe {
+	out := make([]Probe, 0, len(previousEvents))
+	for _, e := range previousEvents {
+		out = append(out, e.Probe)
+	}
+	return out
+}
+
+// IsSupplement distinguishes later additions from replacements in the original search tree.
+func IsSupplement(id string) bool {
+	e, ok := eventByID(id)
+	return ok && e.replaces == ""
+}
+
+func eventByID(id string) (currentEvent, bool) {
+	for _, bank := range [][]currentEvent{previousEvents, currentEvents} {
+		for _, e := range bank {
+			if e.ID == id {
+				return e, true
+			}
+		}
+	}
+	return currentEvent{}, false
+}
+
 func currentSlot(id string) Probe {
-	for _, e := range currentEvents {
+	for _, e := range previousEvents {
 		if e.replaces == id {
 			return e.Probe
 		}

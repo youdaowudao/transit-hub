@@ -61,7 +61,7 @@ func TestReviewedKnowledgeUsesOriginalRequestsAndPersistsFailure(t *testing.T) {
 			if k.BoundaryReview == nil || summary.Verdict.Knowledge.BoundaryReview == nil {
 				t.Fatal("lost full-run provenance")
 			}
-			if n > 10 || len(k.Rows) != n {
+			if n != 10 || len(k.Rows) != n {
 				t.Fatal("request budget/evidence differs", n, k)
 			}
 			if blank {

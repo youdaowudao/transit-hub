@@ -26,6 +26,7 @@ type Verdict struct {
 	Protocol       string          `json:"protocol"`
 	Attempts       int             `json:"attempts"`
 	Rows           []Row           `json:"rows"`
+	Guessed        []Row           `json:"guessed,omitempty"`
 }
 
 type Row struct {
@@ -54,12 +55,13 @@ type Probe struct {
 }
 
 const (
-	kindKnow    = "know"
-	kindUnknown = "unknown"
-	kindWrong   = "wrong"
-	kindError   = "error"
-	kindInvalid = "invalid"
-	maxAsks     = 10
+	kindKnow         = "know"
+	kindUnknown      = "unknown"
+	kindWrong        = "wrong"
+	kindError        = "error"
+	kindInvalid      = "invalid"
+	maxAsks          = 10
+	crossYearMaxAsks = 16
 )
 
 var (
@@ -353,18 +355,20 @@ func decide(p Probe, text string, explicit bool) string {
 }
 
 type search struct {
-	review    bool
-	crossYear bool
-	lo, hi    time.Time
-	asked     int
-	correct   int
-	wrongs    int
-	errors    int
-	invalid   bool
-	current   bool
-	rows      []Row
-	seen      map[string]bool
-	kinds     map[string]string
+	review            bool
+	crossYear         bool
+	previousCrossYear bool
+
+	lo, hi  time.Time
+	asked   int
+	correct int
+	wrongs  int
+	errors  int
+	invalid bool
+	current bool
+	rows    []Row
+	seen    map[string]bool
+	kinds   map[string]string
 }
 
 func newSearch() *search {
@@ -377,15 +381,22 @@ const (
 	modeStop
 )
 
+func (s *search) askLimit() int {
+	if s.crossYear && !s.previousCrossYear {
+		return crossYearMaxAsks
+	}
+	return maxAsks
+}
+
 func (s *search) next() (Probe, bool) {
-	if s.invalid || s.asked >= maxAsks {
+	if s.invalid || s.asked >= s.askLimit() {
 		return Probe{}, false
 	}
 	id, mode := s.script()
 	switch mode {
 	case modeStop:
 		if s.current && !s.lo.IsZero() && !s.hi.IsZero() {
-			return s.nearest(CurrentAnchors(), s.lo, s.hi, true)
+			return s.nearest(PreviousAnchors(), s.lo, s.hi, true)
 		}
 		return Probe{}, false
 	case modeFallback:
@@ -616,7 +627,7 @@ func (s *search) fallback() (Probe, bool) {
 	}
 	anchors := Anchors
 	if s.current {
-		anchors = CurrentAnchors()
+		anchors = PreviousAnchors()
 	}
 	return s.nearest(anchors, lo, hi, false)
 }
@@ -762,8 +773,14 @@ func check(ctx context.Context, c gateway.Client, model string, timeout int, s *
 	protocol := c.ProtocolFor(model)
 	var bank []Probe
 	var today time.Time
+	nextEvent := nextCrossYear
 	if s.crossYear {
-		bank = CurrentAnchors()
+		if s.previousCrossYear {
+			bank = PreviousAnchors()
+			nextEvent = nextPreviousCrossYear
+		} else {
+			bank = CurrentAnchors()
+		}
 		today = nowFn().UTC().Truncate(24 * time.Hour)
 	}
 	ask := func(p Probe) {
@@ -792,10 +809,10 @@ func check(ctx context.Context, c gateway.Client, model string, timeout int, s *
 		var p Probe
 		var ok bool
 		if s.crossYear {
-			if s.invalid || s.asked >= maxAsks {
+			if s.invalid || s.asked >= s.askLimit() {
 				break
 			}
-			p, ok = nextCrossYear(bank, s.rows, today)
+			p, ok = nextEvent(bank, s.rows, today)
 		} else {
 			p, ok = s.next()
 		}
@@ -827,7 +844,7 @@ func check(ctx context.Context, c gateway.Client, model string, timeout int, s *
 	verdict.Attempts = attempts
 	verdict.Protocol = protocol
 	if s.crossYear {
-		verdict = crossYearVerdict(verdict, s.asked >= maxAsks)
+		verdict = crossYearResult(verdict, s.asked >= s.askLimit(), s.previousCrossYear)
 		if ctx.Err() != nil {
 			return InterruptCrossYear(verdict), ctx.Err()
 		}

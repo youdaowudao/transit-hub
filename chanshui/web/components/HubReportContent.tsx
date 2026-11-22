@@ -152,6 +152,8 @@ export default function HubReportContent({
     Boolean(view.groups.knowledge?.some(item => report.retry?.itemIds.includes(item.itemId)));
   const knowledgeReview = view.verdict.knowledge?.boundary_review;
   const crossYear = knowledgeReview?.method === 'cross_year';
+  const monthlyKnowledge = crossYear && items.some(item => item.itemId === 'knowledge:minnesota_2026_pretti');
+  const knowledgeAskLimit = monthlyKnowledge ? 16 : complete ? 10 : undefined;
   const pendingKnowledge = knowledgeReview?.reason === 'retry_pending';
   if (pendingKnowledge && originalVerdict.knowledge) {
     let reason = '补测未完成或未能保存复核结论，请查看最新逐题结果和运行状态。';
@@ -161,7 +163,7 @@ export default function HubReportContent({
       reason = '正在读取本轮补测状态，已保存回答仍可查看。';
     }
     originalVerdict.knowledge = {
-      ...originalVerdict.knowledge, rows: [], label: crossYear ? '知识截止日期未确认' : '日期边界未确认', reason,
+      ...originalVerdict.knowledge, rows: [], guessed: [], label: crossYear ? '知识截止日期未确认' : '日期边界未确认', reason,
     };
     view.verdict.knowledge = originalVerdict.knowledge;
   } else if (crossYear && knowledgeReview.status === 'not_needed' && originalVerdict.knowledge &&
@@ -201,9 +203,13 @@ export default function HubReportContent({
       const skipped=chronological.filter(item=>['not_asked','not_applicable'].includes(itemJudgment(item).status??''));
       const represented=new Set((view.verdict.knowledge?.rows??[]).map(row=>row.id.replace(/^knowledge:/,'')));
       const extra=chronological.filter(item=>!skipped.includes(item)&&!represented.has(item.itemId.replace(/^knowledge:/,'')));
-      const skippedExplanation = crossYear
-        ? '完整默认题库先问两道 2026 年事件，再根据回答选题，每次最多 10 道。展开可查看本轮未选到的题目，未选到的题不算答错。自选题按所选范围检测。'
-        : '完整默认题库沿用原程序的串行二分，每次最多提问10道；列表会写明本轮未选到的题目，未选到的题不算答错。自定义或部分选择时按设置执行。';
+      const skippedExplanation = knowledgeAskLimit === 16
+        ? '完整默认题库先问两道 2026 年事件，再按月补问并核实答对的题，每次最多 16 道。展开可查看本轮未选到的题目，未选到的题不算答错。自选题按所选范围检测。'
+        : !crossYear
+          ? '完整默认题库沿用原程序的串行二分，每次最多提问10道；列表会写明本轮未选到的题目，未选到的题不算答错。自定义或部分选择时按设置执行。'
+          : knowledgeAskLimit === 10
+            ? '完整默认题库先问两道 2026 年事件，再根据回答选题，每次最多 10 道。展开可查看本轮未选到的题目，未选到的题不算答错。自选题按所选范围检测。'
+            : '';
       questions.knowledge = <>
         <p className="muted">点击上方事件行可查看本题已保存回答，默认收起，不重新检测或修改主站。</p>
         {pendingKnowledge && complete && !activeKnowledgeRetry && extra.some(item => ['queued', 'running'].includes(item.status)) &&
@@ -213,7 +219,7 @@ export default function HubReportContent({
           previous={activeKnowledgeRetry && Boolean(report.retry?.itemIds.includes(item.itemId) && ['queued', 'running'].includes(item.status))} />)}
         {skipped.length > 0 && <details className="fold">
           <summary>本轮未提问的题目与原因（{skipped.length}）</summary>
-          <p className="muted">{skippedExplanation}</p>
+          {skippedExplanation && <p className="muted">{skippedExplanation}</p>}
           <div className="question-list">
             {skipped.map(item => <HubQuestionDetails key={item.itemId} item={item} call={call}
               reportId={report.reportId} reportStatus={report.status} />)}
@@ -233,10 +239,10 @@ export default function HubReportContent({
       continue;
     }
 
-    const folds = rows.map((item, index) => <HubQuestionDetails key={report.reportId + ':' + item.itemId} item={item} reportId={report.reportId} reportStatus={report.status} call={call} number={kind === 'iq' ? index + 1 : undefined} onRetry={onRetry} retryDisabled={retryDisabled} verifiedScoring={verified} previous={Boolean(report.retry?.itemIds.includes(item.itemId) && ['queued', 'running'].includes(item.status))} />);
+    const folds = rows.map((item, index) => <HubQuestionDetails key={report.reportId + ':' + item.itemId} item={item} reportId={report.reportId} reportStatus={report.status} call={call} number={kind === 'iq' ? index + 1 : undefined} onRetry={onRetry} retryDisabled={retryDisabled} onJudged={onRefresh} verifiedScoring={verified} previous={Boolean(report.retry?.itemIds.includes(item.itemId) && ['queued', 'running'].includes(item.status))} />);
     const originalQuestionItems = view.native && ['iq','vision'].includes(kind) && rows.every(item => typeof (item.result?.evidence as Record<string,unknown> | undefined)?.[kind==='vision'?'question':'id'] !== 'undefined');
     if(originalQuestionItems) continue;
-    if(view.native && kind==='iq' && view.verdict.iq) {customIQ=<>{rows.filter(item=>!('id' in ((item.result?.evidence as Record<string,unknown>)||{}))).map(item=><HubQuestionDetails key={item.itemId} item={item} reportId={report.reportId} reportStatus={report.status} call={call} onRetry={onRetry} retryDisabled={retryDisabled} verifiedScoring={verified} />)}</>;continue;}
+    if(view.native && kind==='iq' && view.verdict.iq) {customIQ=<>{rows.filter(item=>!('id' in ((item.result?.evidence as Record<string,unknown>)||{}))).map(item=><HubQuestionDetails key={item.itemId} item={item} reportId={report.reportId} reportStatus={report.status} call={call} onRetry={onRetry} retryDisabled={retryDisabled} onJudged={onRefresh} verifiedScoring={verified} />)}</>;continue;}
     questions[kind] = kind === 'iq'  ? <><p className="muted">点击题目查看本次题面、回答和判定；默认收起，不会重新检测或修改主站。</p>{folds}</> : <div className="question-list">{folds}</div>;
   }
   if (knowledgeComparison || sharedDate) {
@@ -268,7 +274,7 @@ export default function HubReportContent({
     {view.native && items.some(item=>item.status==='done'&&item.definition.judge.type!=='model_identity'&&!hasOriginalItemDTO(item)&&!['not_asked','not_applicable'].includes(itemJudgment(item).status??'')) && <p className="muted">本报告含自定义或旧格式结果，已保存回答可逐项展开；旧版未保存的原诊断不能补回，成功结果不会重新提问。</p>}
     {!view.native && ended && <p className="muted">这是旧版接入保存的报告；已有回答保留，但当时未保存的原版诊断不能补回。新检测使用原程序；失败项可在原报告补测。</p>}
     <HubCrossCheckCard cross={crossView} items={items} onRetry={retryCross} onRefresh={() => void refreshCross()} refreshing={manualRefresh} />
-    <ResultCards verdict={view.native ? originalVerdict : view.verdict} model={report.model} loading={!ended} showCache={view.cacheView?.visible ?? Boolean(view.groups.cache)} savedScore={!view.native} totalLabel={view.totalLabel} questions={questions} sectionContent={sectionContent} questionExtra={view.native ? extras : undefined} onQuestionOpen={view.native ? id=>void openQuestion(id) : undefined} collapseVision={view.native} questionTail={customIQ} knowledgeExtra={knowledgeDetail}
+    <ResultCards verdict={view.native ? originalVerdict : view.verdict} model={report.model} loading={!ended} showCache={view.cacheView?.visible ?? Boolean(view.groups.cache)} savedScore={!view.native} totalLabel={view.totalLabel} questions={questions} sectionContent={sectionContent} questionExtra={view.native ? extras : undefined} onQuestionOpen={view.native ? id=>void openQuestion(id) : undefined} collapseVision={view.native} questionTail={customIQ} knowledgeExtra={knowledgeDetail} knowledgeAskLimit={knowledgeAskLimit}
       injectionNote={injection ? INJECTION_NOTE : undefined} injectionDetail={injection ? <HubInjectionDetail item={injection} cross={crossView} model={report.model} call={call} /> : undefined} />
     <ProbeTimeline probes={view.probes} status={report.status} timing={view.native ? view.verdict.timing || timing : timing} progress={view.progress}>
       {!report.model.toLowerCase().startsWith('claude-') && questions.thinking}

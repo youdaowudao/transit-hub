@@ -219,6 +219,18 @@ func (s *Store) Question(ctx context.Context, o Owner, id string) (questions.Def
 	q.Revision = rev
 	return q, e
 }
+
+func enabledQuestionLimit(kind string) int {
+	switch kind {
+	case "iq":
+		return 32
+	case "knowledge":
+		return 40
+	default:
+		return 0
+	}
+}
+
 func (s *Store) SaveQuestion(ctx context.Context, o Owner, q questions.Definition, revision int, restore bool) (questions.Definition, error) {
 	if restore {
 		p, ok := questions.Preset(q.ID)
@@ -261,13 +273,13 @@ func (s *Store) SaveQuestion(ctx context.Context, o Owner, q questions.Definitio
 			}
 			return Conflict("题目已被其他页面修改，请重新读取列表后保存", "question", old)
 		}
-		if q.Enabled && (q.Kind == "iq" || q.Kind == "knowledge") {
+		if limit := enabledQuestionLimit(q.Kind); q.Enabled && limit > 0 {
 			var count int
 			if e = tx.QueryRowContext(ctx, `SELECT count(*) FROM hub_questions WHERE user_id=? AND workspace_id=? AND question_id<>? AND json_extract(definition_json,'$.kind')=? AND json_extract(definition_json,'$.enabled')=1`, o.UserID, o.WorkspaceID, q.ID, q.Kind).Scan(&count); e != nil {
 				return e
 			}
-			if count >= 32 {
-				return Fail(422, "此分类最多启用32道题，请先禁用或删除其他题", "question")
+			if count >= limit {
+				return Fail(422, fmt.Sprintf("此分类最多启用%d道题，请先禁用或删除其他题", limit), "question")
 			}
 		}
 		if old == 0 {

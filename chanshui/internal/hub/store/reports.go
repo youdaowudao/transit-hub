@@ -154,8 +154,8 @@ func (s *Store) CreateReport(ctx context.Context, o Owner, r CreateRequest) (Rep
 		paperSeed := int64(binary.LittleEndian.Uint64(paperSeedBytes[:]) & 0x1fffffffffffff)
 		for _, q := range defs {
 			counts[q.Kind]++
-			if (q.Kind == "iq" || q.Kind == "knowledge") && counts[q.Kind] > 32 {
-				return Fail(422, "推理/知识每类最多启用32题", "create")
+			if limit := enabledQuestionLimit(q.Kind); limit > 0 && counts[q.Kind] > limit {
+				return Fail(422, "推理题最多启用32道，知识题最多启用40道。请在检测设置禁用多余题目后重试，未创建报告或发送请求。", "create")
 			}
 			var seedBytes [8]byte
 			if _, e = rand.Read(seedBytes[:]); e != nil {

@@ -232,7 +232,16 @@ func (s *Store) ListReports(ctx context.Context, o Owner, f Filters) (Page[Summa
 	return out, rows.Err()
 }
 func (s *Store) Report(ctx context.Context, o Owner, id string) (Report, error) {
-	v, e := scanSummary(s.db.QueryRowContext(ctx, `SELECT `+summaryCols+` FROM hub_reports WHERE user_id=? AND workspace_id=? AND report_id=?`, o.UserID, o.WorkspaceID, id))
+	return readReport(ctx, s.db, o, id)
+}
+
+type reportReader interface {
+	QueryRowContext(context.Context, string, ...any) *sql.Row
+	QueryContext(context.Context, string, ...any) (*sql.Rows, error)
+}
+
+func readReport(ctx context.Context, reader reportReader, o Owner, id string) (Report, error) {
+	v, e := scanSummary(reader.QueryRowContext(ctx, `SELECT `+summaryCols+` FROM hub_reports WHERE user_id=? AND workspace_id=? AND report_id=?`, o.UserID, o.WorkspaceID, id))
 	if e == sql.ErrNoRows {
 		return Report{}, Fail(404, "报告不存在或不属于当前工作区", "report")
 	}
@@ -241,12 +250,12 @@ func (s *Store) Report(ctx context.Context, o Owner, id string) (Report, error) 
 	}
 	out := Report{Summary: v, ItemCounts: map[string]int{}}
 	var requestRaw string
-	if e = s.db.QueryRowContext(ctx, `SELECT request_json FROM hub_reports WHERE user_id=? AND workspace_id=? AND report_id=?`, o.UserID, o.WorkspaceID, id).Scan(&requestRaw); e != nil {
+	if e = reader.QueryRowContext(ctx, `SELECT request_json FROM hub_reports WHERE user_id=? AND workspace_id=? AND report_id=?`, o.UserID, o.WorkspaceID, id).Scan(&requestRaw); e != nil {
 		return out, e
 	}
 	out.Request = json.RawMessage(requestRaw)
 	var raw string
-	if e = s.db.QueryRowContext(ctx, `SELECT snapshot_json FROM hub_reports WHERE user_id=? AND workspace_id=? AND report_id=?`, o.UserID, o.WorkspaceID, id).Scan(&raw); e != nil {
+	if e = reader.QueryRowContext(ctx, `SELECT snapshot_json FROM hub_reports WHERE user_id=? AND workspace_id=? AND report_id=?`, o.UserID, o.WorkspaceID, id).Scan(&raw); e != nil {
 		return out, e
 	}
 	var snapshot Snapshot
@@ -258,7 +267,7 @@ func (s *Store) Report(ctx context.Context, o Owner, id string) (Report, error) 
 	out.MemoryLimitMiB = out.Settings.MemoryLimitMiB
 	out.TotalTimeoutSeconds = out.Settings.TotalTimeoutSeconds
 	var attempts int
-	if e = s.db.QueryRowContext(ctx, `SELECT COALESCE(sum(attempts),0) FROM hub_items WHERE report_id=?`, id).Scan(&attempts); e != nil {
+	if e = reader.QueryRowContext(ctx, `SELECT COALESCE(sum(attempts),0) FROM hub_items WHERE report_id=?`, id).Scan(&attempts); e != nil {
 		return out, e
 	}
 	summary := map[string]any{}
@@ -270,14 +279,14 @@ func (s *Store) Report(ctx context.Context, o Owner, id string) (Report, error) 
 	out.Summary.Summary, _ = json.Marshal(summary)
 	if snapshot.Retry != nil {
 		ids, _ := json.Marshal(snapshot.Retry.ItemIDs)
-		e = s.db.QueryRowContext(ctx, `SELECT COALESCE(min(NULLIF(started_at_ms,0)),0) FROM hub_items WHERE report_id=? AND item_id IN(SELECT value FROM json_each(?))`, id, string(ids)).Scan(&out.StartedAtMs)
+		e = reader.QueryRowContext(ctx, `SELECT COALESCE(min(NULLIF(started_at_ms,0)),0) FROM hub_items WHERE report_id=? AND item_id IN(SELECT value FROM json_each(?))`, id, string(ids)).Scan(&out.StartedAtMs)
 	} else {
-		e = s.db.QueryRowContext(ctx, `SELECT COALESCE(min(NULLIF(started_at_ms,0)),0) FROM hub_items WHERE report_id=?`, id).Scan(&out.StartedAtMs)
+		e = reader.QueryRowContext(ctx, `SELECT COALESCE(min(NULLIF(started_at_ms,0)),0) FROM hub_items WHERE report_id=?`, id).Scan(&out.StartedAtMs)
 	}
 	if e != nil {
 		return out, e
 	}
-	rows, e := s.db.QueryContext(ctx, `SELECT status,count(*) FROM hub_items WHERE report_id=? GROUP BY status`, id)
+	rows, e := reader.QueryContext(ctx, `SELECT status,count(*) FROM hub_items WHERE report_id=? GROUP BY status`, id)
 	if e != nil {
 		return out, e
 	}

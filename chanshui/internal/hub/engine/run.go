@@ -153,7 +153,6 @@ func RunOne(ctx context.Context, s *store.Store, o store.Owner, id string, c Cre
 	defer cfg.runner.Close()
 	var resultMu sync.Mutex
 	var saveMu sync.Mutex
-	hadError := false
 	itemResults := map[string]itemResult{}
 	allowed := map[string]bool{}
 	previousSummary := map[string]any{}
@@ -182,7 +181,12 @@ func RunOne(ctx context.Context, s *store.Store, o store.Owner, id string, c Cre
 		previousSummary["knowledge"] = previousVerdict["knowledge"]
 	}
 	previousKnowledge := asMap(previousSummary["knowledge"])
-	crossYear := hasCrossYearMethod(previousKnowledge) && questions.MatchesCurrentKnowledge(snap.Questions)
+	crossYear := hasCrossYearMethod(previousKnowledge)
+	previousCrossYear := false
+	if crossYear && !questions.MatchesCurrentKnowledge(snap.Questions) {
+		previousCrossYear = questions.MatchesPreviousKnowledge(snap.Questions)
+		crossYear = previousCrossYear
+	}
 	crossYearFirst := crossYear && snap.Retry == nil
 	previousTiming := asMap(previousVerdict["timing"])
 	number := func(v any) int64 {
@@ -355,9 +359,6 @@ func RunOne(ctx context.Context, s *store.Store, o store.Owner, id string, c Cre
 		compact := compactResult(q.Definition.Kind, result)
 		resultMu.Lock()
 		itemResults[q.Definition.ID] = compact
-		if result.Error != "" || result.Judgment.Status == "unknown" {
-			hadError = true
-		}
 		resultMu.Unlock()
 		notify("item-saved", map[string]any{"reportId": id, "itemId": q.Definition.ID})
 		return result, nil
@@ -407,7 +408,7 @@ func RunOne(ctx context.Context, s *store.Store, o store.Owner, id string, c Cre
 
 	if len(knowledgeDefs) > 0 {
 		work = append(work, func() error {
-			value, err := originalKnowledge(ctx, s, o, id, knowledgeDefs, snap.Questions, previousKnowledge, crossYear, g, snap.Settings.TimeoutSeconds, report.Model, snap.Retry, execute, itemResults, &resultMu, failStorage, notify)
+			value, err := originalKnowledge(ctx, s, o, id, knowledgeDefs, snap.Questions, previousKnowledge, crossYear, previousCrossYear, g, snap.Settings.TimeoutSeconds, report.Model, snap.Retry, execute, itemResults, &resultMu, failStorage, notify)
 			if value != nil {
 				resultMu.Lock()
 				knowledgeSummary = value
@@ -452,11 +453,6 @@ dispatch:
 	if cfg.singleAsk == nil {
 		pa = prefixSummary(ctx, s, o, id)
 	}
-	for _, result := range itemResults {
-		if result.Error != "" || result.Judgment.Status == "unknown" {
-			hadError = true
-		}
-	}
 	attempts := t.Attempts.Load()
 	if snap.Retry != nil {
 		attempts += int64(snap.Retry.AttemptsBefore)
@@ -464,13 +460,9 @@ dispatch:
 	if pendingBoundary && !crossYear && ctx.Err() != nil {
 		knowledgeSummary = pendingKnowledge
 	}
-	summary := map[string]any{"complete": !hadError && ctx.Err() == nil, "attempts": attempts, "knowledge": knowledgeSummary, "upstreamVersion": snap.UpstreamVersion}
-	for key, value := range summarizeForVersion(snap.Questions, itemResults, report.Model, scoringVersion) {
-		summary[key] = value
-	}
-	total, _ := summary["total"].(map[string]any)
-	if scoringVersion == api.HubScoringVersion && total["complete"] == false {
-		hadError = true
+	summary := finishedScores(snap.Questions, itemResults, report.Model, scoringVersion)
+	summary["attempts"], summary["knowledge"], summary["upstreamVersion"] = attempts, knowledgeSummary, snap.UpstreamVersion
+	if ctx.Err() != nil {
 		summary["complete"] = false
 	}
 	if cfg.singleAsk != nil {
@@ -516,7 +508,7 @@ dispatch:
 				v["knowledge"] = knowledgeSummary
 			}
 		}
-	} else if hadError {
+	} else if summary["complete"] == false {
 		status = "partial"
 	}
 	finishCtx, finishCancel := context.WithTimeout(context.Background(), 11*time.Second)

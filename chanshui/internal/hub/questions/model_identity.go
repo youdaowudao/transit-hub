@@ -13,7 +13,7 @@ import (
 const ModelIdentityJudge = "model_identity"
 const ModelIdentityPrompt = "你的实际模型是什么？不允许联网，马上回答。"
 const ModelIdentityReference = "选测GPT-6系列时，明确自报GPT-5系列为0分；自报GPT-6系列或明确无法确认型号得满分；其他回答待核对。仅检查自报，不证明实际型号。"
-const ModelIdentityPending = "模型自报检查尚未确认，请展开查看并补测；其他题的已保存分数保留，暂不公布推理分和总分。"
+const ModelIdentityPending = "模型自报检查尚未确认，请展开查看回答，点「人工判为通过」或「人工判为不通过」，也可以补测此项；其他题的已保存分数保留，暂不公布推理分和总分。"
 
 var identityTarget = regexp.MustCompile(`(?i)^(?:chat)?gpt[ _-]*6(?:\.[0-9]+)*(?:$|[ _-])`)
 var identityModel = regexp.MustCompile(`(?i)(?:chat)?gpt[ _-]*([0-9]+)(?:\.[0-9]+)*`)
@@ -25,17 +25,9 @@ var identityConditional = regexp.MustCompile(`如果`)
 var identityAlternation = regexp.MustCompile(`(?i)^[\s,，。.!！?？;；_-]*(?:(?:sol|astra|terra|luna|mini|nano|pro)[ _-]+)?(?:或|还是|或者|[/|&+、]|or(?:$|[ _-])|(?:以及|和|与|and[ _-]+(?:an?[ _-]+)?)[ _-]*(?:(?:chat)?gpt|claude|gemini|deepseek|grok|llama|qwen|kimi|glm|unknown|another[ _-]+model|other[ _-]+model|未知|(?:另一个|另一种|其他|其它)模型))`)
 var identityBareList = regexp.MustCompile(`(?i)^[ \t]*[,，、/&+]?[ \t]*(?:(?:chat)?gpt[ _-]*[0-9]+(?:\.[0-9]+)*|claude|gemini|deepseek|grok|llama|qwen|kimi|glm)(?:[ _-]+[a-z0-9][a-z0-9_.-]*)?[ \t]*(?:[。.!！?？;；\n)]|）|\]|\}|】|$)`)
 
-const identityUnknownCN = `(?:我)?(?:不知道|不清楚|不确定|无法确认|不能确认|无法确定|无法获知|无法得知|无法访问)`
-const identityUnknownEN = `(?:i\s+)?(?:don't know|do not know|cannot confirm|can't confirm|cannot determine|can't determine|do not have access to|don't have access to)`
-
-var identityUnknownBare = regexp.MustCompile(`(?i)^(?:(?:我)?(?:不知道|不清楚|不确定|无法确认|不能确认|无法确定|无法获知|无法得知)|(?:i\s+)?(?:don't know|do not know|cannot confirm|can't confirm|cannot determine|can't determine))$`)
-var identityUnknownChinese = regexp.MustCompile(`^` + identityUnknownCN + `\s*(?:(?:我|自己|的|当前|具体|实际|底层|准确|确切|使用的|所用的|运行的|部署的|版本|模型|型号|名称|信息|是|什么|哪一|哪种|哪个)\s*)*$`)
-
-// A reply may explain the missing model information before stating uncertainty.
-var identityUnknownBecauseChinese = regexp.MustCompile(`^(?:(?:当前|本次|这次)?(?:会话|对话|上下文)(?:中)?\s*)?(?:没有|并未|未)\s*(?:(?:向我|给我)\s*)?提供\s*(我的)?\s*(?:具体的?|准确的?|确切的?)?\s*(?:(?:实际|底层)的?)?\s*(?:模型(?:的)?(?:名称|型号|版本)?|型号)\s*(?:(?:或|和|及|以及|、)\s*(?:版本|型号|名称))?\s*[，,]\s*(?:因此|所以|因而)\s*(?:我)?(?:无法|不能)(?:准确|确切)?(?:确认|确定)$`)
-var identityChatGPTIntroduction = regexp.MustCompile(`^(?:我是|我为)\s*(?:openai\s*(?:的|开发的)?\s*)?chatgpt$`)
-var identityUnknownEnglish = regexp.MustCompile(`(?i)^` + identityUnknownEN + `\s*(?:(?:my|own|exact|actual|specific|underlying|current|model|identity|name|version|information|the|of|to|deployment)\s*)*$`)
-var identitySentences = regexp.MustCompile(`[^。.!！?？;；\n]+`)
+var identityUncertain = regexp.MustCompile(`(?i)无法确认|无法准确确认|不能确认|没法确认|无从确认|无法确定|不能确定|不确定|不清楚|不知道|无法核实|不能核实|无法核对|无法得知|无法获知|无法知道|无法判断|不能判断|\b(?:(?:cannot|can't|unable\s+to)\s+(?:confirm|determine|verify|know)|don't\s+know|do\s+not\s+know|not\s+sure|unsure|uncertain|no\s+way\s+to\s+(?:know|verify|confirm))\b`)
+var identityReportedUncertainty = regexp.MustCompile(`(?i)(?:助手|模型|有人|她|他)\s*(?:说|回答|表示|答道)|\b(?:assistant|model)\s+(?:said|reported|replied|answered)\b`)
+var identityEnglishConditional = regexp.MustCompile(`(?i)\b(?:if|unless)\b`)
 
 // ModelIdentityApplies is shared by execution and aggregation, even for an item
 // that never started. The provider prefix does not change the requested model.
@@ -103,9 +95,11 @@ func unquotedIdentity(s string) string {
 
 // Locate declarations and local sentence context once. Queries use indexes,
 // not repeated scans of the prefix of an arbitrarily long upstream reply.
-func identityPositions(s string) (map[int]bool, func(int) bool) {
+func identityPositions(s string) (map[int]bool, func(int, bool) bool) {
 	external := identityExternal.FindAllStringIndex(s, -1)
 	conditional := identityConditional.FindAllStringIndex(s, -1)
+	englishConditional := identityEnglishConditional.FindStringIndex(s)
+	reported := identityReportedUncertainty.FindStringIndex(s)
 	breaks := []int{}
 	marker := 0
 	for offset, r := range s {
@@ -121,22 +115,36 @@ func identityPositions(s string) (map[int]bool, func(int) bool) {
 		}
 		breaks = append(breaks, offset+utf8.RuneLen(r))
 	}
-	clear := func(offset int) bool {
-		// A reported answer may span sentences. Only the general conditional
-		// marker is local; uncertainty stays ungraded rather than guessing who spoke.
-		if len(external) > 0 && external[0][0] < offset {
+	clear := func(offset int, wholeSentence bool) bool {
+		boundary := sort.SearchInts(breaks, offset+1)
+		start, end := 0, offset
+		if boundary > 0 {
+			start = breaks[boundary-1]
+		}
+		if wholeSentence {
+			end = len(s)
+			if boundary < len(breaks) {
+				end = breaks[boundary]
+			}
+			if reported != nil && reported[0] < end {
+				return false
+			}
+			// A period after an English condition can be an abbreviation.
+			// Keep the reply open for manual review when that context is present.
+			if englishConditional != nil && englishConditional[0] < end {
+				return false
+			}
+		}
+		// A reporting marker can introduce later sentences.
+		if len(external) > 0 && external[0][0] < end {
 			return false
 		}
-		start := 0
-		if i := sort.SearchInts(breaks, offset+1) - 1; i >= 0 {
-			start = breaks[i]
-		}
-		i := sort.Search(len(conditional), func(i int) bool { return conditional[i][1] > offset }) - 1
+		i := sort.Search(len(conditional), func(i int) bool { return conditional[i][1] > end }) - 1
 		return i < 0 || conditional[i][0] < start
 	}
 	direct := map[int]bool{}
 	for _, loc := range identityClaim.FindAllStringIndex(s, -1) {
-		direct[loc[1]] = clear(loc[1])
+		direct[loc[1]] = clear(loc[1], false)
 	}
 	return direct, clear
 }
@@ -202,23 +210,12 @@ func gradeModelIdentity(g Generated, answer string) Judgment {
 		j.Reason = "未发现自报型号异常，按本题规则得满分；自报不证明实际型号。"
 	}
 	if len(claims) == 0 && len(mentions) == 0 && len(other) == 0 {
-		bare := identityUnknownBare.MatchString(strings.Trim(strings.ToLower(raw), " \r\n\t。.!！?？;；"))
-		ownModel := false
-		introducedSelf := false
-		for _, span := range identitySentences.FindAllStringIndex(s, -1) {
-			first := strings.TrimSpace(strings.ToLower(s[span[0]:span[1]]))
-			modelObject := strings.Contains(first, "型号") || strings.Contains(first, "模型") || strings.Contains(first, "版本") || strings.Contains(first, "model") || strings.Contains(first, "identity") || strings.Contains(first, "version")
-			directUnknown := modelObject && (identityUnknownChinese.MatchString(first) || identityUnknownEnglish.MatchString(first))
-			explained := identityUnknownBecauseChinese.FindStringSubmatch(first)
-			explainedOwnModel := explained != nil && (explained[1] != "" || introducedSelf)
-			if clearPrefix(span[0]) && (directUnknown || explainedOwnModel) {
-				ownModel = true
+		for _, match := range identityUncertain.FindAllStringIndex(s, -1) {
+			if clearPrefix(match[0], true) {
+				points = g.Definition.MaxScore
+				j.Reason = "未确认具体型号，按本题规则通过并得满分；不证明实际型号。"
+				break
 			}
-			introducedSelf = identityChatGPTIntroduction.MatchString(first)
-		}
-		if bare || ownModel {
-			points = g.Definition.MaxScore
-			j.Reason = "未确认具体型号，按本题规则通过并得满分；不证明实际型号。"
 		}
 	}
 	if points >= 0 {

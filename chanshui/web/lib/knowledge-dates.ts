@@ -46,6 +46,7 @@ export function knowledgeDateComparison(model: string, knowledge: KnowledgeVerdi
   const normalized = name.replace(/[^a-z0-9]/g, '');
   const review = knowledge.boundary_review;
   const crossYear = review?.method === 'cross_year';
+  const guessed = new Set(knowledge.guessed?.map(row => row.id));
   const reviewedModels = ['gpt6sol','gpt6astra','gpt61sol','gpt6luna','gpt61terra','gpt62astra','gpt62sol'];
   if (reviewedModels.includes(normalized)) {
     if (!review) return;
@@ -55,7 +56,7 @@ export function knowledgeDateComparison(model: string, knowledge: KnowledgeVerdi
     const reference = name + ' 的公开知识截止日期为 ' + date + '。';
     const rows = knowledge.rows || [];
     const unknownDates = rows.filter(row => row.kind === 'unknown' && !row.error).map(row => row.happened_at).sort();
-    const known = rows.filter(row => row.kind === 'know' && !row.error);
+    const known = rows.filter(row => row.kind === 'know' && !row.error && !guessed.has(row.id));
     const conflict = unknownDates.length > 0 && known.some(row => row.happened_at >= unknownDates[0]);
     const reasons = ['no_anchor', 'two_unknown', 'no_question', 'limit'];
     const allowed = reasons.includes(review.reason) || (!crossYear && review.reason === 'outside_window');
@@ -86,7 +87,7 @@ export function knowledgeDateComparison(model: string, knowledge: KnowledgeVerdi
   }
 
   const rows = knowledge.rows?.filter(row => !row.error && /^\d{4}-\d{2}-\d{2}$/.test(row.happened_at)) ?? [];
-  const known = Array.from(new Set(rows.filter(row => row.kind === 'know').map(row => row.happened_at))).sort();
+  const known = Array.from(new Set(rows.filter(row => row.kind === 'know' && !guessed.has(row.id)).map(row => row.happened_at))).sort();
   const unknown = Array.from(new Set(rows.filter(row => row.kind === 'unknown').map(row => row.happened_at))).sort();
   const lastKnown = crossYear ? review.from : known[known.length - 1];
   const firstUnknown = crossYear ? review.to : unknown[0];
@@ -108,15 +109,17 @@ export function knowledgeDateComparison(model: string, knowledge: KnowledgeVerdi
   return `本轮知识表现接近 ${candidates}，暂无法区分。`;
 }
 
-export function boundaryReviewText(reason: string, method?: string): string {
+export function boundaryReviewText(reason: string, method?: string, crossYearLimit?: 10 | 16): string {
   if (method === 'cross_year') {
     const reasons: Record<string, string> = {
       two_unknown: '有两道日期接近的事件均明确回答不知道。可展开查看题目和回答。',
       coverage_missing: '本报告不足两道不同日期的 2026 年事件答复，可展开查看已有回答。',
       no_anchor: '本轮缺少足够的答对或明确不知道的事件，可展开查看已有回答。',
       no_question: '附近没有第二道明确回答不知道的事件，可展开查看已有回答。',
-      limit: '本轮已问满 10 道，可展开查看已有回答。',
-      conflict: '较晚的事件答对了，现有回答还不足以确认日期范围。',
+      limit: crossYearLimit ? `本轮已问满 ${crossYearLimit} 道，可展开查看已有回答。` : '',
+      conflict: crossYearLimit === 16
+        ? '有一道较早的事件明确回答不知道，晚于它的答对还没有第二道题支持，现有回答不足以确认日期范围。'
+        : '较晚的事件答对了，现有回答还不足以确认日期范围。',
       main_error: '本轮有知识题未完成，展开失败题可查看具体原因和补测入口。',
       invalid: '本轮有无效回答或疑似联网，可展开查看回答和判定。',
       interrupted: '检测已停止，已保存的回答仍可查看。',

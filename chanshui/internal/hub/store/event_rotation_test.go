@@ -3,6 +3,7 @@ package store
 import (
 	"database/sql"
 	"encoding/json"
+	"fmt"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -11,6 +12,215 @@ import (
 	"github.com/kiss-kedaya/chanshui/internal/hub/questions"
 	"github.com/kiss-kedaya/chanshui/internal/knowledge"
 )
+
+func TestKnowledgeV6RotatesOnlyUntouchedDefaults(t *testing.T) {
+	ctx := t.Context()
+	path := filepath.Join(t.TempDir(), "knowledge-defaults-v6.sqlite")
+	s, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	const oldID = "knowledge:tariffs_2025_april"
+	const newID = "knowledge:us_2025_tariff_pause"
+	old, ok := questions.Preset(oldID)
+	if !ok {
+		t.Fatal("missing original preset", oldID)
+	}
+	oldRaw, err := json.Marshal(old)
+	if err != nil {
+		t.Fatal(err)
+	}
+	edited := Owner{testOwner.UserID, "edited"}
+	disabled := Owner{testOwner.UserID, "disabled"}
+	deleted := Owner{testOwner.UserID, "deleted"}
+	duplicate := Owner{testOwner.UserID, "duplicate"}
+	for _, owner := range []Owner{testOwner, edited, disabled, deleted, duplicate} {
+		if err := s.EnsureScope(ctx, owner); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := s.db.ExecContext(ctx, `DELETE FROM hub_questions
+			WHERE user_id=? AND workspace_id=? AND question_id IN (?,?)`, owner.UserID, owner.WorkspaceID, oldID, newID); err != nil {
+			t.Fatal(err)
+		}
+		if owner != deleted {
+			if _, err := s.db.ExecContext(ctx, `INSERT INTO hub_questions VALUES(?,?,?,?,1)`, owner.UserID, owner.WorkspaceID, oldID, string(oldRaw)); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	const customTitle = "保留我的事件题"
+	if _, err := s.db.ExecContext(ctx, `UPDATE hub_questions SET revision=2, definition_json=json_set(definition_json,'$.title',?)
+		WHERE user_id=? AND workspace_id=? AND question_id=?`, customTitle, edited.UserID, edited.WorkspaceID, oldID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.db.ExecContext(ctx, `UPDATE hub_questions SET revision=2, definition_json=json_set(definition_json,'$.enabled',json('false'))
+		WHERE user_id=? AND workspace_id=? AND question_id=?`, disabled.UserID, disabled.WorkspaceID, oldID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.db.ExecContext(ctx, `INSERT INTO hub_questions VALUES(?,?,?,json_set(?,'$.id',?,'$.title',?),4)`,
+		duplicate.UserID, duplicate.WorkspaceID, newID, string(oldRaw), newID, customTitle); err != nil {
+		t.Fatal(err)
+	}
+	reportID := strings.Repeat("e", 32)
+	if _, err := s.CreateReport(ctx, testOwner, CreateRequest{
+		ReportID: reportID, TargetID: "fixture", Model: "fixture", SelectedQuestionIDs: []string{oldID},
+		Target: Target{BaseURL: "https://fixture.invalid", Protocol: "chat"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	var snapshot string
+	if err := s.db.QueryRowContext(ctx, "SELECT snapshot_json FROM hub_reports WHERE report_id=?", reportID).Scan(&snapshot); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.db.ExecContext(ctx, `PRAGMA user_version=5`); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+	upgraded, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer upgraded.Close()
+	if q, err := upgraded.Question(ctx, testOwner, newID); err != nil || !q.Enabled || q.Order != old.Order || q.Revision != 1 {
+		t.Fatalf("v5 default was not replaced within its slot: %+v (%v)", q, err)
+	}
+	for _, owner := range []Owner{testOwner, deleted} {
+		if _, err := upgraded.Question(ctx, owner, oldID); err == nil {
+			t.Fatal("retired or deleted ID still exists", owner)
+		}
+	}
+	if _, err := upgraded.Question(ctx, deleted, newID); err == nil {
+		t.Fatal("migration resurrected a deleted default")
+	}
+	if q, err := upgraded.Question(ctx, edited, oldID); err != nil || q.Title != customTitle || q.Revision != 2 {
+		t.Fatalf("edited default changed: %+v (%v)", q, err)
+	}
+	if q, err := upgraded.Question(ctx, disabled, oldID); err != nil || q.Enabled || q.Revision != 2 {
+		t.Fatalf("disabled default changed: %+v (%v)", q, err)
+	}
+	if q, err := upgraded.Question(ctx, duplicate, newID); err != nil || q.Title != customTitle || q.Revision != 4 {
+		t.Fatalf("existing destination changed: %+v (%v)", q, err)
+	}
+	if _, err := upgraded.Question(ctx, duplicate, oldID); err != nil {
+		t.Fatal("migration removed the old question after a destination collision", err)
+	}
+	var after string
+	if err := upgraded.db.QueryRowContext(ctx, "SELECT snapshot_json FROM hub_reports WHERE report_id=?", reportID).Scan(&after); err != nil || after != snapshot {
+		t.Fatal("report snapshot changed", err)
+	}
+}
+
+func TestKnowledgeV6SupplementsPreserveWorkspacesAndUseFortyQuestionLimit(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "knowledge-v6.sqlite")
+	s, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	const january = "knowledge:minnesota_2026_pretti"
+	const february = "knowledge:wbd_2026_bid"
+	const march = "knowledge:iea_2026_reserves"
+	const oldID = "knowledge:ao_2026_women"
+	old, _ := questions.Preset(oldID)
+	oldRaw, err := json.Marshal(old)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := t.Context()
+	for _, owner := range []Owner{testOwner, {"user-A", "another-workspace"}} {
+		if err := s.EnsureScope(ctx, owner); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := s.db.ExecContext(ctx, `INSERT OR IGNORE INTO hub_questions VALUES(?,?,?,?,1)`,
+			owner.UserID, owner.WorkspaceID, oldID, string(oldRaw)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, statement := range []string{
+		`DELETE FROM hub_questions WHERE question_id IN ('` + january + `','` + february + `','` + march + `','Q10','knowledge:ao_2025_zverev','knowledge:afcon_2026_goal')`,
+		`UPDATE hub_questions SET definition_json=json_set(definition_json,'$.title','用户改过的澳网题'),revision=2 WHERE question_id='knowledge:ao_2026_women'`,
+		`INSERT INTO hub_questions SELECT user_id,workspace_id,'` + february + `',json_set(definition_json,'$.id','` + february + `','$.enabled',json('false'),'$.title','已编辑的同编号题'),3 FROM hub_questions WHERE question_id='knowledge:ao_2026_women'`,
+		`PRAGMA user_version=5`,
+	} {
+		if _, err := s.db.Exec(statement); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+	upgraded, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer upgraded.Close()
+	var version int
+	if err := upgraded.db.QueryRow("PRAGMA user_version").Scan(&version); err != nil || version != 6 {
+		t.Fatalf("expected v6: %d (%v)", version, err)
+	}
+	for _, owner := range []Owner{testOwner, {"user-A", "another-workspace"}} {
+		for _, id := range []string{january, march} {
+			want, _ := questions.Preset(id)
+			got, err := upgraded.Question(ctx, owner, id)
+			if err != nil || !got.Enabled || got.Revision != 1 || got.Order != want.Order {
+				t.Fatalf("missing default %s in %v: %+v (%v)", id, owner, got, err)
+			}
+		}
+		if q, err := upgraded.Question(ctx, owner, february); err != nil || q.Title != "已编辑的同编号题" || q.Enabled || q.Revision != 3 {
+			t.Fatalf("edited same-ID question changed: %+v (%v)", q, err)
+		}
+		if q, err := upgraded.Question(ctx, owner, "knowledge:ao_2026_women"); err != nil || q.Title != "用户改过的澳网题" || q.Revision != 2 {
+			t.Fatalf("edited old question changed: %+v (%v)", q, err)
+		}
+		for _, id := range []string{"knowledge:ao_2025_zverev", "Q10"} {
+			if _, err := upgraded.Question(ctx, owner, id); err == nil {
+				t.Fatal("migration resurrected a deleted question", id)
+			}
+		}
+	}
+	page, err := upgraded.ListQuestions(ctx, testOwner, Filters{Kind: "knowledge", Limit: 50})
+	if err != nil {
+		t.Fatal(err)
+	}
+	enabled := 0
+	for _, row := range page.Items {
+		if row.Enabled {
+			enabled++
+		}
+	}
+	q, _ := questions.Preset(january)
+	for i := enabled; i <= 40; i++ {
+		q.ID = fmt.Sprintf("custom:%032x", i)
+		_, err := upgraded.SaveQuestion(ctx, testOwner, q, 0, false)
+		if (err == nil) != (i < 40) {
+			t.Fatalf("adding question %d: %v", i+1, err)
+		}
+	}
+	id := strings.Repeat("a", 32)
+	if _, err := upgraded.CreateReport(ctx, testOwner, CreateRequest{ReportID: id, TargetID: "fixture", Model: "fixture", SelectedSectionIDs: []string{"knowledge"}, Target: Target{BaseURL: "https://fixture.invalid", Protocol: "chat"}}); err != nil {
+		t.Fatalf("40 enabled knowledge questions could not create a new report: %v", err)
+	}
+	if err := upgraded.DeleteQuestion(ctx, testOwner, january, 1); err != nil {
+		t.Fatal(err)
+	}
+	if err := upgraded.Close(); err != nil {
+		t.Fatal(err)
+	}
+	reopened, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reopened.Close()
+	if _, err := reopened.Question(ctx, testOwner, january); err == nil {
+		t.Fatal("reopen put a deleted supplement back")
+	}
+	if q, err := reopened.Question(ctx, testOwner, march); err != nil || q.Revision != 1 {
+		t.Fatalf("reopen reinserted the saved supplement: %+v (%v)", q, err)
+	}
+}
 
 func seedLegacyKnowledge(t *testing.T, s *Store, owner Owner) {
 	t.Helper()
@@ -122,7 +332,7 @@ func TestEventRotationPreservesCustomizationAndFrozenQueue(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer upgraded.Close()
-	for owner, want := range map[Owner]int{testOwner: 24, edited: 16, disabled: 16, deleted: 15, added: 17} {
+	for owner, want := range map[Owner]int{testOwner: 27, edited: 19, disabled: 19, deleted: 18, added: 20} {
 		page, err := upgraded.ListQuestions(t.Context(), owner, Filters{Kind: "knowledge", Limit: 32})
 		if err != nil || len(page.Items) != want {
 			t.Fatalf("owner %v has %d events, want %d: %v", owner, len(page.Items), want, err)

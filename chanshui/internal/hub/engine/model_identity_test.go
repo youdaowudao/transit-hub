@@ -15,6 +15,86 @@ import (
 func identityDefinition() questions.Generated {
 	return questions.Generated{Definition: questions.Definition{ID: "Q10", Kind: "iq", MaxScore: 5, Judge: questions.Judge{Type: "model_identity"}}}
 }
+
+func TestJudgeIdentityUsesSavedScoringAndKeepsReportEvidence(t *testing.T) {
+	for _, otherStatus := range []string{"done", "error", "cancelled"} {
+		t.Run(otherStatus, func(t *testing.T) {
+			s, err := store.Open(":memory:")
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer s.Close()
+			ctx := t.Context()
+			owner := store.Owner{UserID: "judge-user", WorkspaceID: "judge-workspace"}
+			id := strings.Repeat("a", 32)
+			req := store.CreateRequest{ReportID: id, TargetID: "fixture", Model: "gpt-6.2-sol",
+				SelectedQuestionIDs: []string{"Q2", "Q10"}, Target: store.Target{BaseURL: "https://fixture.invalid", Protocol: "chat"}}
+			if _, err := s.CreateReport(ctx, owner, req); err != nil {
+				t.Fatal(err)
+			}
+			if err := s.BeginRun(ctx, owner, id); err != nil {
+				t.Fatal(err)
+			}
+			q, _ := questions.Preset("Q2")
+			other := itemResult{Judgment: questions.Judgment{Status: "known", Max: q.MaxScore, Earned: points(q.MaxScore)}}
+			if otherStatus == "error" {
+				other.Error, other.Judgment.Status = "原请求失败", "unknown"
+			}
+			if err := s.SaveItem(ctx, owner, id, "Q2", otherStatus, other, 1); err != nil {
+				t.Fatal(err)
+			}
+			const autoReason = "原自动判定原因"
+			identity := json.RawMessage(`{"answer":"原回答","metrics":{"input":123},"attempts":2,"judgment":{"status":"unknown","max":5,"reason":"` + autoReason + `"}}`)
+			if err := s.SaveItem(ctx, owner, id, "Q10", "done", identity, 2); err != nil {
+				t.Fatal(err)
+			}
+			before := json.RawMessage(`{"complete":false,"attempts":3,"knowledge":{"status":"custom"},"upstreamVersion":"fixture","verdict":{"protocol":"chat","timing":{"runs":1},"knowledge":{"status":"custom"}}}`)
+			originalStatus := "partial"
+			if otherStatus == "cancelled" {
+				originalStatus = "cancelled"
+			}
+			if err := s.Finish(ctx, owner, id, originalStatus, before, nil); err != nil {
+				t.Fatal(err)
+			}
+			for i, verdict := range []string{"pass", "fail"} {
+				report, err := s.JudgeItem(ctx, owner, store.JudgeRequest{ReportID: id, ItemID: "Q10", Verdict: verdict}, RescoreSummary)
+				if err != nil {
+					t.Fatal(err)
+				}
+				var summary map[string]any
+				if err := json.Unmarshal(report.Summary.Summary, &summary); err != nil {
+					t.Fatal(err)
+				}
+				wantStatus := originalStatus
+				if otherStatus == "done" {
+					wantStatus = "done"
+					if summary["iqScore"] == nil || summary["iqScore"] != summary["totalScore"] || (summary["iqScore"] == float64(100)) != (verdict == "pass") {
+						t.Fatalf("%s did not change both scores: %v", verdict, summary)
+					}
+				}
+				if report.Status != wantStatus || summary["complete"] != (wantStatus == "done") || summary["attempts"] != float64(3) || summary["upstreamVersion"] != "fixture" ||
+					asMap(summary["knowledge"])["status"] != "custom" || asMap(asMap(summary["verdict"])["knowledge"])["status"] != "custom" ||
+					asMap(asMap(summary["verdict"])["timing"])["runs"] != float64(1) {
+					t.Fatalf("unrelated report evidence or state changed: %s %v", report.Status, summary)
+				}
+				page, err := s.ListItems(ctx, owner, id, store.Filters{})
+				if err != nil || len(page.Items) != 2 {
+					t.Fatal(page, err)
+				}
+				item := page.Items[1]
+				var result map[string]any
+				if err := json.Unmarshal(item.Result, &result); err != nil {
+					t.Fatal(err)
+				}
+				j := asMap(result["judgment"])
+				if item.ItemID != "Q10" || item.Status != "done" || item.Attempts != 2 || result["answer"] != "原回答" || asMap(result["metrics"])["input"] != float64(123) ||
+					j["status"] != "known" || j["earned"] != float64(5*(1-i)) || j["autoReason"] != autoReason || j["source"] != "manual" || j["half"] != false {
+					t.Fatalf("wrong persisted item after %s: %+v %v", verdict, item, result)
+				}
+			}
+		})
+	}
+}
 func TestModelIdentityScoringNormalizes105AndNeverConfirmsMissingAnswer(t *testing.T) {
 	defs := []questions.Generated{}
 	results := map[string]itemResult{}

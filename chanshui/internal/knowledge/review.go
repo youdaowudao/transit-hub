@@ -162,7 +162,7 @@ func evaluateBoundary(v Verdict, interrupted, allowAsk bool, checkID string) (Ve
 	for _, row := range rows {
 		seen[row.ID] = row
 	}
-	for _, p := range CurrentAnchors() {
+	for _, p := range PreviousAnchors() {
 		if p.ID != anchor.ID && p.HappenedAt != anchor.HappenedAt && p.HappenedAt >= r.From && p.HappenedAt <= r.To {
 			candidates = append(candidates, p)
 		}

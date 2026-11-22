@@ -11,7 +11,7 @@ export interface HubJudge { type: 'legacy' | 'text' | 'number' | 'keywords' | 'm
 export interface HubQuestion { id: string; title: string; kind: HubKind; enabled: boolean; order: number; maxScore: number; template: string; parameters: Record<string, unknown>; judge: HubJudge; revision?: number }
 export type HubQuestionSummary = Pick<HubQuestion, 'id' | 'title' | 'kind' | 'enabled' | 'order' | 'revision'>;
 export interface HubReport { retry?: { id: string; expectedRetryId: string; itemIds: string[]; attemptsBefore: number; acceptedAtMs: number }; reportId: string; targetId: string; accountName: string; accountId?: string; groupId?: string; groupName: string; model: string; protocol?: string; status: string; createdAtMs: number; startedAtMs?: number; updatedAtMs?: number; queuePosition?: number; queuedCount?: number; stopRequested?: boolean; itemCounts?: Record<string, number>; summary?: Record<string, unknown>; settings?: HubSettings; processExited?: boolean; diagnostic?: string; error?: unknown; taskMemoryMaxBytes?: number; sliceMemoryMaxBytes?: number; swapMaxBytes?: number; memoryPeakBytes?: number }
-export interface HubItem { tags?: string[]; itemId: string; sectionId: string; orderIndex?: number; usableInjectionPoints?: 0 | 1 | 2; definition: HubQuestion; prompt: string; expected: string; status: string; attempts?: number; startedAtMs?: number; completedAtMs?: number; imageAvailable?: boolean; result?: { answer?: string; earned?: number | null; max?: number; half?: boolean; judgment?: string | { status?: string; reason?: string; earned?: number | null; max?: number; half?: boolean }; error?: string; metrics?: unknown; evidence?: unknown; [key: string]: unknown } }
+export interface HubItem { tags?: string[]; itemId: string; sectionId: string; orderIndex?: number; usableInjectionPoints?: 0 | 1 | 2; definition: HubQuestion; prompt: string; expected: string; status: string; attempts?: number; startedAtMs?: number; completedAtMs?: number; imageAvailable?: boolean; result?: { answer?: string; earned?: number | null; max?: number; half?: boolean; judgment?: string | { status?: string; reason?: string; earned?: number | null; max?: number; half?: boolean; source?: string }; error?: string; metrics?: unknown; evidence?: unknown; [key: string]: unknown } }
 export interface HubRuntime { enabled: boolean; available: boolean; reason?: string; memoryCeilingBytes?: number; busy?: boolean; queueBlocked?: boolean; queuedCount?: number; active?: HubReport | null }
 export interface HubPage<T> { items: T[]; nextCursor?: string }
 export type HubStartApproval = (currentProtocol?: HubProtocol) => boolean;
@@ -78,7 +78,7 @@ export interface HubCrossCheck {
   }> | null;
   expectedPromptIds: string[];
   expectedPromptNames: string[];
-  selfReport: { present: boolean; itemId: string; status: string; earned: number | null; max: number | null; byPrompt: boolean };
+  selfReport: { present: boolean; itemId: string; status: string; source?: string; earned: number | null; max: number | null; byPrompt: boolean };
   knowledge: { rows: number; peerReports: number; contradictions: Array<{ eventId: string; event: string; date: string; knownBy: number }> };
   vision: { status: HubVisionStatus; peerFull: number };
   codes: Array<'mixed_routes' | 'prompt_mismatch' | 'self_report_gpt5' | 'knowledge_older' | 'vision_mismatch'>;

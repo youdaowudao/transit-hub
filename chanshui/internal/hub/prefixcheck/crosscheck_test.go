@@ -281,6 +281,20 @@ func TestCrossGroupingAndSelfReport(t *testing.T) {
 	}
 }
 
+func TestCrossCheckManualIdentityIsNotModelEvidence(t *testing.T) {
+	for _, earned := range []int{0, 5} {
+		var input IdentityInput
+		err := json.Unmarshal([]byte(fmt.Sprintf(`{"ItemID":"Q10","Status":"known","Earned":%d,"Max":5,"Source":"manual"}`, earned)), &input)
+		if err != nil {
+			t.Fatal(err)
+		}
+		got := CrossCheck(CrossInput{Report: ReportInput{Model: "gpt-6.2-sol", Status: "done"}, Identity: &input})
+		if got.Grade != "E" || slices.Contains(got.Codes, "self_report_gpt5") || got.SelfReport.ByPrompt || !got.SelfReport.Present {
+			t.Fatalf("human score %d must be displayed without being used as model evidence: %+v", earned, got)
+		}
+	}
+}
+
 func TestCrossPromptMatchesAndGrades(t *testing.T) {
 	for _, tc := range []struct {
 		model     string

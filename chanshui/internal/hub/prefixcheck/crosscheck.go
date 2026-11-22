@@ -35,6 +35,7 @@ type IdentityInput struct {
 	ItemID     string
 	OrderIndex int
 	Status     string
+	Source     string
 	Earned     *int64
 	Max        *int64
 }
@@ -118,6 +119,7 @@ type SelfReport struct {
 	Present  bool   `json:"present"`
 	ItemID   string `json:"itemId"`
 	Status   string `json:"status"`
+	Source   string `json:"source,omitempty"`
 	Earned   *int64 `json:"earned"`
 	Max      *int64 `json:"max"`
 	ByPrompt bool   `json:"byPrompt"`
@@ -438,8 +440,8 @@ func CrossCheck(in CrossInput) Result {
 	}
 	selfValid, selfGPT5 := false, false
 	if ident := in.Identity; ident != nil {
-		out.SelfReport = SelfReport{Present: true, ItemID: ident.ItemID, Status: ident.Status, Earned: ident.Earned, Max: ident.Max}
-		selfValid = ident.Status == "known" && ident.Earned != nil && *ident.Earned >= 0
+		out.SelfReport = SelfReport{Present: true, ItemID: ident.ItemID, Status: ident.Status, Source: ident.Source, Earned: ident.Earned, Max: ident.Max}
+		selfValid = ident.Source != "manual" && ident.Status == "known" && ident.Earned != nil && *ident.Earned >= 0
 		selfGPT5 = selfValid && *ident.Earned == 0
 		if selfGPT5 {
 			out.Codes = append(out.Codes, "self_report_gpt5")

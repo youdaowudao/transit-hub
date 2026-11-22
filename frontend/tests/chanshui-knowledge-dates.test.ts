@@ -89,3 +89,17 @@ it('跨年报告只有独立的较晚正答可提示核对，早期未知或失�
   result.boundary_review.reason = 'main_error'
   expect(knowledgeDateComparison('gpt-6.1-sol', result)).not.toContain('答对了多道')
 })
+
+it('可能蒙对的两道体育题不会触发型号核对，公开日期仍显示', () => {
+  const kentucky = event('2026-05-02', 'know')
+  const pga = event('2026-05-17', 'know')
+  const result = observations(kentucky, pga)
+  result.status = 'unknown'
+  result.boundary_review = { method: 'cross_year', status: 'unconfirmed', reason: 'no_anchor' }
+  result.guessed = [kentucky, pga]
+  expect(knowledgeDateComparison('gpt-6.1-sol', result)).toBe('GPT-6.1 Sol 的公开知识截止日期为 2026-04-30。')
+  result.guessed = [kentucky]
+  expect(knowledgeDateComparison('gpt-6.1-sol', result)).not.toContain('请核对上游型号')
+  result.guessed = []
+  expect(knowledgeDateComparison('gpt-6.1-sol', result)).toContain('请核对上游型号')
+})

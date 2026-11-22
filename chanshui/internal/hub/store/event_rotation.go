@@ -5,11 +5,13 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"strings"
 
 	"github.com/kiss-kedaya/chanshui/internal/hub/questions"
+	"github.com/kiss-kedaya/chanshui/internal/knowledge"
 )
 
-const schemaVersion = 5
+const schemaVersion = 6
 
 func (s *Store) migrate(ctx context.Context) error {
 	conn, err := s.db.Conn(ctx)
@@ -52,14 +54,55 @@ func (s *Store) migrate(ctx context.Context) error {
 			return migrationFailure(err)
 		}
 	}
-	if err = addModelIdentityDefault(ctx, conn); err != nil {
+	if version < 5 {
+		if err = addModelIdentityDefault(ctx, conn); err != nil {
+			return migrationFailure(err)
+		}
+	}
+	if err = refreshKnowledgeDefaults(ctx, conn); err != nil {
 		return migrationFailure(err)
 	}
-	if _, err = conn.ExecContext(ctx, "PRAGMA user_version=5"); err != nil {
+	if _, err = conn.ExecContext(ctx, "PRAGMA user_version=6"); err != nil {
 		return migrationFailure(err)
 	}
 	if _, err = conn.ExecContext(ctx, "COMMIT"); err != nil {
 		return migrationFailure(err)
+	}
+	return nil
+}
+
+func refreshKnowledgeDefaults(ctx context.Context, conn *sql.Conn) error {
+	previous := make(map[string]questions.Definition)
+	for _, q := range questions.PreviousKnowledge() {
+		previous[q.ID] = q
+	}
+	for _, q := range questions.CurrentKnowledge() {
+		id := strings.TrimPrefix(q.ID, "knowledge:")
+		oldAnchorID, replaces := knowledge.ReplacedAnchorID(id)
+		if !replaces && !knowledge.IsMonthlySupplement(id) {
+			continue
+		}
+		raw, err := json.Marshal(q)
+		if err != nil {
+			return err
+		}
+		if replaces {
+			oldID := "knowledge:" + oldAnchorID
+			oldRaw, err := json.Marshal(previous[oldID])
+			if err != nil {
+				return err
+			}
+			// The workspace's primary key retains both rows if the new ID already exists.
+			if _, err = conn.ExecContext(ctx, `UPDATE OR IGNORE hub_questions SET question_id=?,definition_json=?
+				WHERE question_id=? AND definition_json=? AND revision=1`, q.ID, string(raw), oldID, string(oldRaw)); err != nil {
+				return err
+			}
+			continue
+		}
+		if _, err = conn.ExecContext(ctx, `INSERT OR IGNORE INTO hub_questions
+			SELECT user_id,workspace_id,?,?,1 FROM hub_settings`, q.ID, string(raw)); err != nil {
+			return err
+		}
 	}
 	return nil
 }
@@ -88,9 +131,9 @@ func rotateKnowledgeDefaults(ctx context.Context, conn *sql.Conn) error {
 		}
 		legacy[q.ID] = string(raw)
 	}
-	current := questions.CurrentKnowledge()
-	definitions := make([]string, 0, len(current))
-	for _, q := range current {
+	defaults := questions.PreviousKnowledge()
+	definitions := make([]string, 0, len(defaults))
+	for _, q := range defaults {
 		raw, err := json.Marshal(q)
 		if err != nil {
 			return err
@@ -121,7 +164,7 @@ func rotateKnowledgeDefaults(ctx context.Context, conn *sql.Conn) error {
 			owner.UserID, owner.WorkspaceID); err != nil {
 			return err
 		}
-		for i, q := range current {
+		for i, q := range defaults {
 			if _, err = conn.ExecContext(ctx, "INSERT INTO hub_questions VALUES(?,?,?,?,1)", owner.UserID, owner.WorkspaceID, q.ID, definitions[i]); err != nil {
 				return err
 			}

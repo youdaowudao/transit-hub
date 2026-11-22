@@ -2,12 +2,52 @@ package engine
 
 import (
 	"encoding/json"
+	"fmt"
 
 	"github.com/kiss-kedaya/chanshui/internal/api"
 	"github.com/kiss-kedaya/chanshui/internal/hub/questions"
+	"github.com/kiss-kedaya/chanshui/internal/hub/store"
 	"github.com/kiss-kedaya/chanshui/internal/integrity"
 	"github.com/kiss-kedaya/chanshui/internal/iq"
 )
+
+// RescoreSummary uses only the report's saved questions and item results.
+func RescoreSummary(defs []questions.Generated, items map[string]store.Item, model, scoringVersion string) (map[string]any, error) {
+	if scoringVersion == "" {
+		scoringVersion = api.DefaultScoringVersion
+	}
+	results := make(map[string]itemResult, len(items))
+	for _, q := range defs {
+		id := q.Definition.ID
+		item, ok := items[id]
+		if !ok {
+			return nil, fmt.Errorf("报告缺少题目 %s 的记录，请核查原报告数据", id)
+		}
+		r, err := savedResult(item.Result)
+		if err != nil {
+			return nil, fmt.Errorf("题目 %s 的判分记录无法读取：%w", id, err)
+		}
+		if item.Status != "done" {
+			r.Judgment.Status = "unknown"
+		}
+		results[id] = compactResult(q.Definition.Kind, r)
+	}
+	return finishedScores(defs, results, model, scoringVersion), nil
+}
+
+func finishedScores(defs []questions.Generated, results map[string]itemResult, model, scoringVersion string) map[string]any {
+	summary := summarizeForVersion(defs, results, model, scoringVersion)
+	total, _ := summary["total"].(map[string]any)
+	complete := scoringVersion != api.HubScoringVersion || total["complete"] != false
+	for _, result := range results {
+		if result.Error != "" || result.Judgment.Status == "unknown" {
+			complete = false
+			break
+		}
+	}
+	summary["complete"] = complete
+	return summary
+}
 
 func boolJudgment(pass *bool, reason string) questions.Judgment {
 	j := questions.Judgment{Status: "unknown", Max: 1, Reason: reason}

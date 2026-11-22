@@ -235,11 +235,14 @@ export function checkLines(cross: HubCrossCheck): CheckLine[] {
     }
   }
 
-  const { present, status, earned, byPrompt } = cross.selfReport;
+  const { present, status, earned, byPrompt, source } = cross.selfReport;
   if (present && status === 'not_applicable') add('self.na');
   else if (present && status === 'known' && earned !== null && Number.isSafeInteger(earned) && earned >= 0) {
-    add(earned === 0 ? 'self.gpt5' : 'self.ok');
-    if (earned === 0 && byPrompt) add(cross.perItemChecked ? 'self.gpt5.byPrompt' : 'self.gpt5.byInjection');
+    if (source === 'manual') add(earned === 0 ? 'self.manual.fail' : 'self.manual.pass');
+    else {
+      add(earned === 0 ? 'self.gpt5' : 'self.ok');
+      if (earned === 0 && byPrompt) add(cross.perItemChecked ? 'self.gpt5.byPrompt' : 'self.gpt5.byInjection');
+    }
   } else add(present ? 'self.unconfirmed' : 'self.none');
 
   const { rows, contradictions, peerReports } = cross.knowledge;
@@ -300,6 +303,8 @@ export function lineText(line: CheckLine, cross: HubCrossCheck): string {
     case 'route.unreliable': return '线路：注入检测的两次请求结果连不成合理的直线，可能被分到了不同线路。';
     case 'route.unchecked': return '线路：这份报告没有逐题核对，无法判断。';
     case 'self.gpt5': return '模型自报：回答自称 GPT-5 系列，与所选的 GPT-6 系列不符。';
+    case 'self.manual.pass': return '模型自报：人工判为通过，按本题满分计分。';
+    case 'self.manual.fail': return '模型自报：人工判为不通过，本题 0 分。';
     case 'self.gpt5.byPrompt': return '按长度判断，这道题的请求里上游加的提示词写着“基于 GPT-5”，自报很可能来自提示词，单凭这一项不能断定型号。';
     case 'self.gpt5.byInjection': return '按长度判断，注入检测的请求里上游加的提示词写着“基于 GPT-5”。这份报告没有逐题核对，无法确认这道题的请求是否也带着它；单凭自报不能断定型号。';
     case 'self.ok': return '模型自报：没有发现与所选模型矛盾的说法（自报不证明实际型号）。';

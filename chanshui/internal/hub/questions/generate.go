@@ -248,6 +248,14 @@ func OriginalKnowledge(q Definition) (knowledge.Probe, bool) {
 
 // MatchesCurrentKnowledge checks the frozen knowledge questions only.
 func MatchesCurrentKnowledge(defs []Generated) bool {
+	return matchesKnowledge(defs, knowledge.CurrentAnchors())
+}
+
+func MatchesPreviousKnowledge(defs []Generated) bool {
+	return matchesKnowledge(defs, knowledge.PreviousAnchors())
+}
+
+func matchesKnowledge(defs []Generated, bank []knowledge.Probe) bool {
 	ids := make(map[string]bool)
 	for _, q := range defs {
 		if q.Definition.Kind != "knowledge" {
@@ -259,7 +267,6 @@ func MatchesCurrentKnowledge(defs []Generated) bool {
 		}
 		ids[p.ID] = true
 	}
-	bank := knowledge.CurrentAnchors()
 	if len(ids) != len(bank) {
 		return false
 	}

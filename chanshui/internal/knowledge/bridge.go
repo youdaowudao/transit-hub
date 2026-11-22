@@ -10,12 +10,8 @@ func Anchor(id string) (Probe, bool) {
 			return p, true
 		}
 	}
-	for _, event := range currentEvents {
-		if event.ID == id {
-			return event.Probe, true
-		}
-	}
-	return Probe{}, false
+	e, ok := eventByID(id)
+	return e.Probe, ok
 }
 func Observe(p Probe, answer, failure string) Row {
 	s := newSearch()

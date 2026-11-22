@@ -131,7 +131,7 @@ func TestReviewKnowledgeRetryUsesCumulativePersistedAttempts(t *testing.T) {
 		assertCumulativeKnowledgeRetry(t, s, o, id, c)
 	})
 	t.Run("current", func(t *testing.T) {
-		s, o, id, c := setup(t, []string{"knowledge:virginia_2025_governor", "knowledge:ao_2026_women"}, "chat")
+		s, o, id, c := setup(t, []string{"knowledge:virginia_2025_governor", "knowledge:afcon_2026_goal"}, "chat")
 		assertCumulativeKnowledgeRetry(t, s, o, id, c)
 	})
 }

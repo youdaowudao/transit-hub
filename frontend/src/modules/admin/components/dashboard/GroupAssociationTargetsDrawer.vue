@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { OverlayTransition } from '@/components/ui/transition'
 import { computed, nextTick, ref, watch } from 'vue'
 import { Check, ChevronDown, ChevronUp, Link2, Loader2, Search, Server, Settings2, X } from 'lucide-vue-next'
 import { t } from '@/locales'
@@ -194,17 +195,11 @@ const formatOptionMultiplier = (option: MySiteUpstreamTargetOption): string => {
 
 <template>
   <Teleport to="body">
-    <Transition
-      enter-active-class="transition duration-200 ease-out"
-      enter-from-class="opacity-0"
-      enter-to-class="opacity-100"
-      leave-active-class="transition duration-150 ease-in"
-      leave-from-class="opacity-100"
-      leave-to-class="opacity-0"
-    >
+    <OverlayTransition variant="drawer">
       <div v-if="open" class="fixed inset-0 z-[160]">
         <div class="absolute inset-0 bg-background/70 backdrop-blur-sm" @click="saving ? undefined : emit('close')" />
         <aside
+          data-overlay-panel
           role="dialog"
           aria-modal="true"
           :aria-label="t(`${prefix}.titleWithGroup`, { group: ownGroup })"
@@ -382,6 +377,6 @@ const formatOptionMultiplier = (option: MySiteUpstreamTargetOption): string => {
           </footer>
         </aside>
       </div>
-    </Transition>
+    </OverlayTransition>
   </Teleport>
 </template>

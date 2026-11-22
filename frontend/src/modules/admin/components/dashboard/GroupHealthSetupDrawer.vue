@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { OverlayTransition } from '@/components/ui/transition'
 import { accountLabelForTarget, accountReminderLabel } from '../../utils/connectionHealthAccountLabel'
 import { computed, ref, watch } from 'vue'
 import {
@@ -653,17 +654,11 @@ const close = () => {
 
 <template>
   <Teleport to="body">
-    <Transition
-      enter-active-class="transition duration-200 ease-out"
-      enter-from-class="opacity-0"
-      enter-to-class="opacity-100"
-      leave-active-class="transition duration-150 ease-in"
-      leave-from-class="opacity-100"
-      leave-to-class="opacity-0"
-    >
+    <OverlayTransition variant="drawer">
       <div v-if="open && group" class="fixed inset-0 z-[150]">
         <div class="absolute inset-0 bg-background/65 backdrop-blur-sm" @click="close" />
         <aside
+          data-overlay-panel
           role="dialog"
           aria-modal="true"
           :aria-label="t(`${prefix}.title`)"
@@ -1010,6 +1005,6 @@ const close = () => {
           </footer>
         </aside>
       </div>
-    </Transition>
+    </OverlayTransition>
   </Teleport>
 </template>

@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { OverlayTransition } from '@/components/ui/transition'
 import { computed, ref, watch } from 'vue'
 import { X, ClipboardList, Loader2, Play, Square, Ban } from 'lucide-vue-next'
 import { getGroupRateCampaign } from '../../api/groupRateCampaigns'
@@ -113,27 +114,12 @@ const statusBadgeClass = (status: string): string => {
 
 <template>
   <Teleport to="body">
-    <Transition
-      enter-active-class="transition duration-200 ease-out"
-      enter-from-class="opacity-0"
-      enter-to-class="opacity-100"
-      leave-active-class="transition duration-150 ease-in"
-      leave-from-class="opacity-100"
-      leave-to-class="opacity-0"
-    >
+    <OverlayTransition variant="drawer">
       <div v-if="open" class="fixed inset-0 z-[150]">
         <div class="absolute inset-0 bg-background/60 backdrop-blur-sm" @click="emit('close')" />
 
-        <Transition
-          enter-active-class="transition duration-250 ease-out"
-          enter-from-class="translate-x-full"
-          enter-to-class="translate-x-0"
-          leave-active-class="transition duration-200 ease-in"
-          leave-from-class="translate-x-0"
-          leave-to-class="translate-x-full"
-        >
           <div
-            v-if="open"
+            data-overlay-panel
             role="dialog"
             aria-modal="true"
             :aria-label="t(`${prefix}.title`)"
@@ -269,8 +255,7 @@ const statusBadgeClass = (status: string): string => {
               </button>
             </div>
           </div>
-        </Transition>
       </div>
-    </Transition>
+    </OverlayTransition>
   </Teleport>
 </template>

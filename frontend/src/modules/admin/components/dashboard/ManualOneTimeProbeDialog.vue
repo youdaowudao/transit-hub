@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { OverlayTransition } from '@/components/ui/transition'
 import { accountNameText, accountReminderLabel, currentAccountNames, historicalAccountLabel, type AccountLabels, type HistoryAccountLabel } from '../../utils/connectionHealthAccountLabel'
 import { computed, onBeforeUnmount, ref, watch } from 'vue'
 import {
@@ -1846,14 +1847,7 @@ const close = () => {
 
 <template>
   <Teleport to="body">
-    <Transition
-      enter-active-class="transition duration-200 ease-out"
-      enter-from-class="opacity-0"
-      enter-to-class="opacity-100"
-      leave-active-class="transition duration-150 ease-in"
-      leave-from-class="opacity-100"
-      leave-to-class="opacity-0"
-    >
+    <OverlayTransition>
       <div v-if="open && target" class="fixed inset-0 z-[150] flex items-center justify-center p-2">
         <div class="absolute inset-0 bg-background/60 backdrop-blur-sm" @click="close" />
 
@@ -2264,6 +2258,6 @@ const close = () => {
           </div>
         </div>
       </div>
-    </Transition>
+    </OverlayTransition>
   </Teleport>
 </template>

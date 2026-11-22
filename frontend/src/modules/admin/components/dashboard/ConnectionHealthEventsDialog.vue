@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { OverlayTransition } from '@/components/ui/transition'
 import { computed, onBeforeUnmount, ref, watch } from 'vue'
 import { accountLabelForTarget, accountReminderLabel, type AccountLabels } from '../../utils/connectionHealthAccountLabel'
 import { Activity, ArrowRight, X } from 'lucide-vue-next'
@@ -585,14 +586,7 @@ const nextProbeLabel = (card: StatusCard): string => {
 
 <template>
   <Teleport to="body">
-    <Transition
-      enter-active-class="transition duration-200 ease-out"
-      enter-from-class="opacity-0"
-      enter-to-class="opacity-100"
-      leave-active-class="transition duration-150 ease-in"
-      leave-from-class="opacity-100"
-      leave-to-class="opacity-0"
-    >
+    <OverlayTransition>
       <div v-if="open" class="fixed inset-0 z-[140] flex items-center justify-center p-4">
         <div class="absolute inset-0 bg-background/60 backdrop-blur-sm" @click="emit('close')" />
 
@@ -726,6 +720,6 @@ const nextProbeLabel = (card: StatusCard): string => {
           </div>
         </div>
       </div>
-    </Transition>
+    </OverlayTransition>
   </Teleport>
 </template>

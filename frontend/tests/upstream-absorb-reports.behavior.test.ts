@@ -284,7 +284,9 @@ describe('Review settings initialization and preserved daily context', () => {
     expect(system.isVisible()).toBe(true)
     await w.get('#settings-tab-strategy').trigger('click')
     expect(w.get('#settings-panel-strategy').isVisible()).toBe(true)
-    if (system.exists()) expect(system.isVisible()).toBe(false)
+    // 标签切换不再有离场动画，离开的面板会直接移除；仍留在页面上时必须不可见。
+    const leaving = w.find('#settings-panel-system')
+    if (leaving.exists()) expect(leaving.isVisible()).toBe(false)
   })
   it.each(['sent', 'failed', 'unknown'] as const)('preserves an in-flight manual test and its %s feedback across tabs', async status => {
     const pending = deferred<any>()

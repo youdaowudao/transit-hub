@@ -403,11 +403,7 @@ watch(
           <p class="break-words">{{ notifications.summaryError.value }}</p>
           <button type="button" class="underline" :disabled="notifications.summaryLoading.value" @click="notifications.refreshSummary()">重试读取</button>
         </div>
-        <router-view v-slot="{ Component }">
-          <transition name="fade" mode="out-in">
-            <component :is="Component" />
-          </transition>
-        </router-view>
+        <router-view />
       </main>
     </div>
   </div>
@@ -416,15 +412,6 @@ watch(
   <NotificationCriticalDialog :controller="notifications" />
 </template>
 <style scoped>
-.fade-enter-active,
-.fade-leave-active {
-  transition: opacity 0.2s ease, transform 0.2s ease;
-}
-.fade-enter-from,
-.fade-leave-to {
-  opacity: 0;
-  transform: translateY(10px);
-}
 .dropdown-enter-active,
 .dropdown-leave-active {
   transition: opacity 0.15s ease, transform 0.15s ease;

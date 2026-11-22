@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { OverlayTransition } from '@/components/ui/transition'
 import { computed, ref, watch } from 'vue'
 import { Check, Copy, Globe2, Link2, Loader2, RefreshCw, X } from 'lucide-vue-next'
 import { Button } from '@/components/ui/button'
@@ -72,7 +73,7 @@ const copy = async () => {
 
 <template>
   <Teleport to="body">
-    <Transition enter-active-class="transition duration-150" enter-from-class="opacity-0" leave-active-class="transition duration-100" leave-to-class="opacity-0">
+    <OverlayTransition>
       <div v-if="open" class="fixed inset-0 z-[160] flex items-center justify-center bg-background/70 p-4 backdrop-blur-sm" @click.self="emit('close')">
         <div role="dialog" aria-modal="true" :aria-label="t('admin.leaderboard.embed.title')" class="w-full max-w-xl overflow-hidden rounded-lg border border-border bg-card shadow-2xl">
           <header class="flex items-center justify-between border-b border-border px-5 py-4">
@@ -121,6 +122,6 @@ const copy = async () => {
           </footer>
         </div>
       </div>
-    </Transition>
+    </OverlayTransition>
   </Teleport>
 </template>

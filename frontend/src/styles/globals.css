@@ -26,6 +26,8 @@
     --muted: 210 40% 96.1%;
     --muted-foreground: 215.4 16.3% 46.9%;
     --border: 220 13% 89%;
+    --motion-ease-out: cubic-bezier(0.23, 1, 0.32, 1);
+    --motion-ease-drawer: cubic-bezier(0.32, 0.72, 0, 1);
   }
 
   .dark {
@@ -83,6 +85,52 @@ a {
 
 ::selection {
   background: hsl(var(--primary) / 0.24);
+}
+
+/* 弹窗、抽屉进出场：配合 components/ui/transition/OverlayTransition.vue 使用。
+   外层元素负责淡入淡出，Vue 按外层的过渡时长判断动画结束；
+   面板（data-overlay-panel）的位移、缩放与外层时长保持一致。 */
+.overlay-fade-enter-active,
+.overlay-modal-enter-active {
+  transition: opacity 200ms var(--motion-ease-out);
+}
+.overlay-fade-leave-active,
+.overlay-modal-leave-active {
+  transition: opacity 150ms var(--motion-ease-out);
+}
+.overlay-drawer-enter-active {
+  transition: opacity 300ms var(--motion-ease-drawer);
+}
+.overlay-drawer-leave-active {
+  transition: opacity 200ms var(--motion-ease-drawer);
+}
+.overlay-fade-enter-from,
+.overlay-fade-leave-to,
+.overlay-modal-enter-from,
+.overlay-modal-leave-to,
+.overlay-drawer-enter-from,
+.overlay-drawer-leave-to {
+  opacity: 0;
+}
+.overlay-modal-enter-active [data-overlay-panel] {
+  transition: transform 200ms var(--motion-ease-out);
+}
+.overlay-modal-leave-active [data-overlay-panel] {
+  transition: transform 150ms var(--motion-ease-out);
+}
+.overlay-modal-enter-from [data-overlay-panel],
+.overlay-modal-leave-to [data-overlay-panel] {
+  transform: scale(0.96);
+}
+.overlay-drawer-enter-active [data-overlay-panel] {
+  transition: transform 300ms var(--motion-ease-drawer);
+}
+.overlay-drawer-leave-active [data-overlay-panel] {
+  transition: transform 200ms var(--motion-ease-drawer);
+}
+.overlay-drawer-enter-from [data-overlay-panel],
+.overlay-drawer-leave-to [data-overlay-panel] {
+  transform: translateX(100%);
 }
 
 @media (prefers-reduced-motion: reduce) {

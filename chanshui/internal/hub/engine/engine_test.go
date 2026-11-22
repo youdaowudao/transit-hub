@@ -393,8 +393,19 @@ func TestConfiguredCachePrefixAndTurnTemplatesActuallyUsedAcrossSixTurns(t *test
 	r, _ := s.Report(context.Background(), o, id)
 	var summary map[string]any
 	json.Unmarshal(r.Summary.Summary, &summary)
-	if summary["totalScore"] != nil || asMap(summary["total"])["score"] != nil || asMap(asMap(summary["verdict"])["total"])["score"] != nil {
-		t.Fatal("unknown cache published a formal total", summary)
+	if _, ok := summary["totalScore"].(float64); !ok {
+		t.Errorf("unknown cache should publish a numeric total: %v", summary["totalScore"])
+	}
+	part := cacheScorePart(t, summary)
+	if part["known"] != false || part["contribution"] != float64(0) {
+		t.Errorf("unknown cache should contribute zero points: %v", part)
+	}
+	const pendingReason = "缓存读写尚未确认，这一项暂按 0 分计入总分；详情见下方「缓存读写验证」，确认后总分会更新。"
+	if reason := asMap(summary["total"])["reason"]; reason != pendingReason {
+		t.Errorf("unexpected pending cache total reason: %v", reason)
+	}
+	if r.Status != "partial" {
+		t.Errorf("unknown cache should leave the report partial, got %s", r.Status)
 	}
 }
 func TestDeepSeekUnknownKeepsOriginalNetworkApplicability(t *testing.T) {

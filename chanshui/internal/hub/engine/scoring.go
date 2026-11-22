@@ -181,6 +181,9 @@ func summarizeForVersion(defs []questions.Generated, results map[string]itemResu
 		case "web":
 			v.Web = ev
 		case "cache":
+			if verifiedCache && r.ManualJudgment && r.Error == "" && r.Judgment.Status == "known" && r.Judgment.Earned != nil {
+				ev["pass"] = *r.Judgment.Earned > 0
+			}
 			_, hasPass := ev["pass"].(bool)
 			evidenceError, _ := ev["error"].(string)
 			cachePending = cachePending || (verifiedCache && (r.Judgment.Status != "known" || !hasPass || evidenceError != ""))
@@ -219,9 +222,11 @@ func summarizeForVersion(defs []questions.Generated, results map[string]itemResu
 	iqMap := asMap(v.IQ)
 	total := asMap(v.Total)
 	if cachePending {
-		total["score"], total["complete"] = nil, false
-		if !identityPending {
-			total["reason"] = api.HubCachePendingReason
+		total["complete"] = false
+		if identityPending {
+			total["score"] = nil
+		} else {
+			total["reason"] = api.HubCacheUnconfirmedReason
 		}
 		verdict["total"] = total
 	}

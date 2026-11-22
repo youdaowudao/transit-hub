@@ -3,6 +3,8 @@ package cachecheck
 import (
 	"context"
 	"fmt"
+	"strconv"
+	"strings"
 
 	"github.com/kiss-kedaya/chanshui/internal/gateway"
 )
@@ -70,6 +72,10 @@ func fromVerifiedMetrics(metrics []gateway.Metrics, prefixHash, protocol string,
 	}
 	if link.Pass != nil {
 		r.ThirdReadRatio = chainRate(link.Actual, link.Expected)
+	}
+	if allWritesZero(r.Samples) {
+		r.judgeVerifiedReuse()
+		return r
 	}
 	r.judgeVerifiedChain(last, link)
 	return r
@@ -187,6 +193,40 @@ func verifiedTransition(from, to Sample, readOnly bool) Transition {
 	}
 	link.Pass = &pass
 	return link
+}
+
+func allWritesZero(samples []Sample) bool {
+	if len(samples) != cacheTurns {
+		return false
+	}
+	for _, sample := range samples {
+		if !sample.WriteReported || sample.Write != 0 {
+			return false
+		}
+	}
+	return true
+}
+
+func (r *Result) judgeVerifiedReuse() {
+	var readTurns []string
+	for i, sample := range r.Samples {
+		if !sample.ReadReported || !sample.InputReported || sample.Total <= 0 {
+			r.Reason = fmt.Sprintf("缓存尚未确认：第%d轮没有返回有效的缓存读取或总输入。", sample.Index)
+			return
+		}
+		if i > 0 && sample.Read > 0 {
+			readTurns = append(readTurns, strconv.Itoa(sample.Index))
+		}
+	}
+	if len(readTurns) > 0 {
+		r.setVerifiedOutcome(true, fmt.Sprintf("上游每轮回传的缓存写入都是 0，无法核对相邻两轮的衔接，改按整段对话判断：第%s轮读到了缓存。本次缓存通过。", strings.Join(readTurns, "、")))
+		return
+	}
+	if r.Samples[0].Read == 0 {
+		r.setVerifiedOutcome(false, "六轮请求均已完成，接口明确回传的缓存读取和写入都为 0。本次缓存未通过。")
+		return
+	}
+	r.setVerifiedOutcome(false, "上游每轮回传的缓存写入都是 0，第2至6轮都没有读到缓存。本次缓存未通过。")
 }
 
 func (r *Result) judgeVerifiedChain(last Sample, link Transition) {

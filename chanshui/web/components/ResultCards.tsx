@@ -69,7 +69,7 @@ export default function ResultCards({
   model,
   loading = false,
   showCache = false,
-  savedScore = false, totalLabel = "", questions, sectionContent, questionExtra, onQuestionOpen, collapseVision = false, questionTail, knowledgeExtra,
+  savedScore = false, preserveTotalScore = false, totalLabel = "", questions, sectionContent, questionExtra, onQuestionOpen, collapseVision = false, questionTail, knowledgeExtra,
   injectionNote, injectionDetail, knowledgeAskLimit,
 }: {
   verdict: DetectVerdict;
@@ -77,6 +77,7 @@ export default function ResultCards({
   loading?: boolean;
   showCache?: boolean;
   savedScore?: boolean;
+  preserveTotalScore?: boolean;
   totalLabel?: string;
   questions?: Partial<Record<string, ReactNode>>;
   sectionContent?: Partial<Record<string, ReactNode>>;
@@ -158,7 +159,8 @@ export default function ResultCards({
   const unconfirmed = fpState === "unconfirmed" && f?.basis === "numeric" &&
     Number.isInteger(f.used_outputs) && f.used_outputs > 0;
   const astraUnconfirmed = unconfirmed && canonModel(model || "") === "gpt6astra";
-  const scored: DetectVerdict = v.total && typeof v.total.score === 'number' && !savedScore
+  const unknownCache = verifiedHub && v.total?.parts.some(part => part.key === 'cache' && part.applicable && !part.known);
+  const scored: DetectVerdict = v.total && typeof v.total.score === 'number' && !savedScore && !unknownCache && !preserveTotalScore
     ? {
         ...v,
         total: {
@@ -169,7 +171,6 @@ export default function ResultCards({
     : v;
   const score = scored.total?.score;
   const totalText = totalLabel || (score === null ? tr("总分尚未确认") : "");
-  const unknownCache = verifiedHub && scored.total?.parts.some(part => part.key === 'cache' && part.applicable && !part.known);
   return (
     <div
       className={"results " + (loading ? "results-loading" : "results-settled")}
@@ -186,7 +187,8 @@ export default function ResultCards({
             </strong>
             {!totalText && <span>/ 100</span>}
           </div>
-          {totalText && <p className="muted">{totalText === '本次不计总分' ? '本次没有自动计分项，请展开题目人工查看。' : score === null && (unknownCache || unconfirmedIQ) && scored.total.reason ? scored.total.reason : '仍有计分项未确认，请查看对应题目；未知不当0分。'}</p>}
+          {totalText && <p className="muted">{totalText === '本次不计总分' ? '本次没有自动计分项，请展开题目人工查看。' : (unknownCache || score === null && unconfirmedIQ) && scored.total.reason ? scored.total.reason : '仍有计分项未确认，请查看对应题目；未知不当0分。'}</p>}
+          {!totalText && typeof score === 'number' && unknownCache && scored.total.reason && <p className="muted">{scored.total.reason}</p>}
           <div className="integrity-signals">
             {scored.total.parts.filter((item) => item.applicable).map((item) => (
               <div className="integrity-signal" key={item.key}>

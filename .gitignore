@@ -31,3 +31,5 @@ backend/.prisma
 development-docs/
 data/
 docs/
+docs/上游价格备忘/
+.local/

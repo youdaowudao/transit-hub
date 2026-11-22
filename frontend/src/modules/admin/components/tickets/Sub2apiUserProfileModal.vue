@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { OverlayTransition } from '@/components/ui/transition'
 import { ref, watch } from 'vue'
 import { AlertCircle, Loader2, User, X } from 'lucide-vue-next'
 import { getSub2apiUserProfile } from '../../api/tickets'
@@ -62,26 +63,11 @@ const formatAmount = (value: number | null | undefined): string => (
 
 <template>
   <Teleport to="body">
-    <Transition
-      enter-active-class="transition duration-200 ease-out"
-      enter-from-class="opacity-0"
-      enter-to-class="opacity-100"
-      leave-active-class="transition duration-150 ease-in"
-      leave-from-class="opacity-100"
-      leave-to-class="opacity-0"
-    >
+    <OverlayTransition variant="modal">
       <div v-if="open" class="fixed inset-0 z-[150] flex items-center justify-center p-4">
         <div class="absolute inset-0 bg-background/60 backdrop-blur-sm" @click="emit('close')" />
 
-        <Transition
-          enter-active-class="transition duration-200 ease-out"
-          enter-from-class="opacity-0 scale-95"
-          enter-to-class="opacity-100 scale-100"
-          leave-active-class="transition duration-150 ease-in"
-          leave-from-class="opacity-100 scale-100"
-          leave-to-class="opacity-0 scale-95"
-        >
-          <div v-if="open" role="dialog" aria-modal="true" :aria-label="t(`${prefix}.title`)" class="relative max-h-[85dvh] w-full max-w-md overflow-y-auto rounded-2xl border border-border/60 bg-card shadow-2xl">
+          <div data-overlay-panel role="dialog" aria-modal="true" :aria-label="t(`${prefix}.title`)" class="relative max-h-[85dvh] w-full max-w-md overflow-y-auto rounded-2xl border border-border/60 bg-card shadow-2xl">
             <div class="sticky top-0 z-10 flex items-center justify-between gap-3 border-b border-border/60 bg-card/95 backdrop-blur px-5 py-4">
               <div class="flex items-center gap-2.5">
                 <div class="flex h-8 w-8 items-center justify-center rounded-lg bg-primary/10 text-primary">
@@ -220,8 +206,7 @@ const formatAmount = (value: number | null | undefined): string => (
               {{ t(`${prefix}.empty`) }}
             </div>
           </div>
-        </Transition>
       </div>
-    </Transition>
+    </OverlayTransition>
   </Teleport>
 </template>

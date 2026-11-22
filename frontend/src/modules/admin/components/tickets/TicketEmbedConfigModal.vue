@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { OverlayTransition } from '@/components/ui/transition'
 import { onUnmounted, ref, watch } from 'vue'
 import { AlertCircle, Check, Copy, ExternalLink, Loader2, MessageSquare, Plus, RefreshCw, RotateCcw, Trash2, X } from 'lucide-vue-next'
 import { getEmbedConfig, rotateEmbedToken, updateEmbedConfig } from '../../api/tickets'
@@ -226,27 +227,12 @@ const openPreview = () => {
 
 <template>
   <Teleport to="body">
-    <Transition
-      enter-active-class="transition duration-200 ease-out"
-      enter-from-class="opacity-0"
-      enter-to-class="opacity-100"
-      leave-active-class="transition duration-150 ease-in"
-      leave-from-class="opacity-100"
-      leave-to-class="opacity-0"
-    >
+    <OverlayTransition variant="modal">
       <div v-if="open" class="fixed inset-0 z-[150] flex items-center justify-center p-4">
         <div class="absolute inset-0 bg-background/60 backdrop-blur-sm" @click="emit('close')" />
 
-        <Transition
-          enter-active-class="transition duration-200 ease-out"
-          enter-from-class="opacity-0 scale-95"
-          enter-to-class="opacity-100 scale-100"
-          leave-active-class="transition duration-150 ease-in"
-          leave-from-class="opacity-100 scale-100"
-          leave-to-class="opacity-0 scale-95"
-        >
           <div
-            v-if="open"
+            data-overlay-panel
             role="dialog"
             aria-modal="true"
             :aria-label="t(`${prefix}.title`)"
@@ -543,8 +529,7 @@ const openPreview = () => {
             </div>
           </div>
           </div>
-        </Transition>
       </div>
-    </Transition>
+    </OverlayTransition>
   </Teleport>
 </template>

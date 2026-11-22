@@ -20,7 +20,8 @@ export default function HubQuestionDetails({ item, call, reportId, reportStatus 
   const [judging, setJudging] = useState(false), [judgeError, setJudgeError] = useState('');
   const manual = judgment.source === 'manual';
   const detectionActive = reportStatus === 'queued' || reportStatus === 'running';
-  const canJudge = Boolean(onJudged) && item.definition.judge.type === 'model_identity' && hasAnswer && !result.error &&
+  const identityJudge = item.definition.judge.type === 'model_identity' && hasAnswer;
+  const canJudge = Boolean(onJudged) && (identityJudge || verifiedCache) && !result.error &&
     (item.status === 'done' || detectionActive && ['queued', 'running'].includes(item.status)) && (judgment.status === 'unknown' || manual);
   const currentVerdict = manual ? judgment.earned === 0 ? 'fail' : 'pass' : '';
   const judgeItem = async (verdict: 'pass' | 'fail') => {
@@ -67,7 +68,9 @@ export default function HubQuestionDetails({ item, call, reportId, reportStatus 
       <button type="button" className="btn-secondary" disabled={detectionActive || judging || currentVerdict === 'pass'} onClick={() => void judgeItem('pass')}>人工判为通过</button>
       <button type="button" className="btn-secondary" disabled={detectionActive || judging || currentVerdict === 'fail'} onClick={() => void judgeItem('fail')}>人工判为不通过</button>
       {retry}
-      <p className="muted">看过上面的模型回答后由你判定：通过得本题满分，不通过得 0 分。只改本报告这一题并重算推理分和总分，不重新提问、不产生请求费用、不修改主站；之后可以改判。</p>
+      <p className="muted">{verifiedCache
+        ? '看过下面各轮的缓存读取和写入后由你判定：通过计入缓存这一项的分数，不通过得 0 分。只改本报告这一项并重算总分，不重新请求、不产生费用、不修改主站；之后可以改判。'
+        : '看过上面的模型回答后由你判定：通过得本题满分，不通过得 0 分。只改本报告这一题并重算推理分和总分，不重新提问、不产生请求费用、不修改主站；之后可以改判。'}</p>
       {detectionActive && <p className="muted">检测或补测进行中，结束后才能人工判定。</p>}
       {judgeError && <p className="error-box" role="alert">{judgeError}</p>}
     </>}

@@ -25,7 +25,7 @@ var identityConditional = regexp.MustCompile(`如果`)
 var identityAlternation = regexp.MustCompile(`(?i)^[\s,，。.!！?？;；_-]*(?:(?:sol|astra|terra|luna|mini|nano|pro)[ _-]+)?(?:或|还是|或者|[/|&+、]|or(?:$|[ _-])|(?:以及|和|与|and[ _-]+(?:an?[ _-]+)?)[ _-]*(?:(?:chat)?gpt|claude|gemini|deepseek|grok|llama|qwen|kimi|glm|unknown|another[ _-]+model|other[ _-]+model|未知|(?:另一个|另一种|其他|其它)模型))`)
 var identityBareList = regexp.MustCompile(`(?i)^[ \t]*[,，、/&+]?[ \t]*(?:(?:chat)?gpt[ _-]*[0-9]+(?:\.[0-9]+)*|claude|gemini|deepseek|grok|llama|qwen|kimi|glm)(?:[ _-]+[a-z0-9][a-z0-9_.-]*)?[ \t]*(?:[。.!！?？;；\n)]|）|\]|\}|】|$)`)
 
-var identityUncertain = regexp.MustCompile(`(?i)无法确认|无法准确确认|不能确认|没法确认|无从确认|无法确定|不能确定|不确定|不清楚|不知道|无法核实|不能核实|无法核对|无法得知|无法获知|无法知道|无法判断|不能判断|\b(?:(?:cannot|can't|unable\s+to)\s+(?:confirm|determine|verify|know)|don't\s+know|do\s+not\s+know|not\s+sure|unsure|uncertain|no\s+way\s+to\s+(?:know|verify|confirm))\b`)
+var identityUncertain = regexp.MustCompile(`(?i)(?:无法|不能|没法|无从|难以)\p{Han}{0,4}(?:确认|确定|核实|核对|得知|获知|知道|判断|验证|核验)|不确定|不清楚|不知道|\b(?:(?:cannot|can't|unable\s+to)\s+(?:[a-z]+\s+){0,2}(?:confirm|determine|verify|know)|don't\s+know|do\s+not\s+know|not\s+sure|unsure|uncertain|no\s+way\s+to\s+(?:know|verify|confirm))\b`)
 var identityReportedUncertainty = regexp.MustCompile(`(?i)(?:助手|模型|有人|她|他)\s*(?:说|回答|表示|答道)|\b(?:assistant|model)\s+(?:said|reported|replied|answered)\b`)
 var identityEnglishConditional = regexp.MustCompile(`(?i)\b(?:if|unless)\b`)
 
@@ -43,8 +43,8 @@ func ModelIdentityApplies(model string) bool {
 
 // Quoted text cannot establish the respondent's identity. Blank the quoted
 // span, preserving unrelated, unquoted self declarations and their order.
-func unquotedIdentity(s string) string {
-	runes := []rune(s)
+func unquotedIdentity(normalized, original string) string {
+	runes := []rune(original)
 	var close rune
 	lineStart := true
 	block := false
@@ -90,7 +90,20 @@ func unquotedIdentity(s string) string {
 			runes[i] = ' '
 		}
 	}
-	return string(runes)
+	// Project the original scanner's exclusions onto the normalized text.
+	// Removed runes have no output position.
+	out := []rune(normalized)
+	originalPosition, position := 0, 0
+	for _, r := range original {
+		if normalizeIdentityRune(r) >= 0 {
+			if runes[originalPosition] == ' ' {
+				out[position] = ' '
+			}
+			position++
+		}
+		originalPosition++
+	}
+	return string(out)
 }
 
 // Locate declarations and local sentence context once. Queries use indexes,
@@ -171,10 +184,26 @@ func identityChoice(tail string) bool {
 	}
 	return identityAlternation.MatchString(tail) || identityBareList.MatchString(tail)
 }
+func normalizeIdentityRune(r rune) rune {
+	switch r {
+	case '\u200b', '\u200c', '\u200d', '\u2060', '\ufeff':
+		return -1
+	case '\u2010', '\u2011', '\u2012', '\u2013', '\u2014', '\u2015', '\u2212', '\ufe58', '\ufe63', '\uff0d':
+		return '-'
+	case '\u00a0', '\u2007', '\u202f', '\u3000':
+		return ' '
+	}
+	if r >= '\uff10' && r <= '\uff19' || r >= '\uff21' && r <= '\uff3a' || r >= '\uff41' && r <= '\uff5a' {
+		return r - 0xfee0
+	}
+	return r
+}
 func gradeModelIdentity(g Generated, answer string) Judgment {
 	j := Judgment{Status: "unknown", Max: g.Definition.MaxScore, Tags: []string{}, Reason: "自报内容无法按本题规则确认，未给出确定分数；请查看完整回答，必要时在本报告补测此项。"}
 	raw := strings.TrimSpace(strings.NewReplacer("**", "", "__", "", "’", "'", "‘", "'", "：", ":").Replace(answer))
-	s := unquotedIdentity(raw)
+	normalized := strings.Map(normalizeIdentityRune, raw)
+	// Normalize before removing quotes, then derive every byte index from s.
+	s := unquotedIdentity(normalized, raw)
 	direct, clearPrefix := identityPositions(s)
 	mentions := identityModel.FindAllStringSubmatchIndex(s, -1)
 	other := otherIdentityModel.FindAllStringIndex(s, -1)

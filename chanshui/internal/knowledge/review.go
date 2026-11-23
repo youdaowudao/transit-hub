@@ -20,6 +20,10 @@ type BoundaryReview struct {
 	CheckID  string `json:"check_id,omitempty"`
 	Status   string `json:"status"`
 	Reason   string `json:"reason"`
+	// Model-group reports save the question set used at creation so retries keep it after upgrades.
+	Group string   `json:"group,omitempty"`
+	Know  []string `json:"know,omitempty"`
+	Newer []string `json:"newer,omitempty"`
 }
 
 func ReviewModel(model string) bool {

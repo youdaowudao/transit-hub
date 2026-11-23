@@ -273,9 +273,10 @@ func (s *Store) SaveQuestion(ctx context.Context, o Owner, q questions.Definitio
 			}
 			return Conflict("题目已被其他页面修改，请重新读取列表后保存", "question", old)
 		}
-		if limit := enabledQuestionLimit(q.Kind); q.Enabled && limit > 0 {
+		if limit := enabledQuestionLimit(q.Kind); q.Enabled && limit > 0 && !(q.Kind == "knowledge" && questions.IsModelAddition(q.ID)) {
 			var count int
-			if e = tx.QueryRowContext(ctx, `SELECT count(*) FROM hub_questions WHERE user_id=? AND workspace_id=? AND question_id<>? AND json_extract(definition_json,'$.kind')=? AND json_extract(definition_json,'$.enabled')=1`, o.UserID, o.WorkspaceID, q.ID, q.Kind).Scan(&count); e != nil {
+			addedIDs, _ := json.Marshal(questions.ModelAdditionIDs())
+			if e = tx.QueryRowContext(ctx, `SELECT count(*) FROM hub_questions WHERE user_id=? AND workspace_id=? AND question_id<>? AND json_extract(definition_json,'$.kind')=? AND json_extract(definition_json,'$.enabled')=1 AND (? <> 'knowledge' OR question_id NOT IN (SELECT value FROM json_each(?)))`, o.UserID, o.WorkspaceID, q.ID, q.Kind, q.Kind, string(addedIDs)).Scan(&count); e != nil {
 				return e
 			}
 			if count >= limit {

@@ -251,6 +251,25 @@ func MatchesCurrentKnowledge(defs []Generated) bool {
 	return matchesKnowledge(defs, knowledge.CurrentAnchors())
 }
 
+func MatchesModelKnowledge(defs []Generated) bool {
+	return matchesKnowledge(defs, knowledge.ModelAnchors())
+}
+
+func MatchesModelDefinitions(defs []Definition) bool {
+	generated := make([]Generated, 0, len(defs))
+	for _, def := range defs {
+		if def.Kind != "knowledge" {
+			continue
+		}
+		p, ok := OriginalKnowledge(def)
+		if !ok {
+			return false
+		}
+		generated = append(generated, Generated{Definition: def, Prompt: p.Prompt()})
+	}
+	return MatchesModelKnowledge(generated)
+}
+
 func MatchesPreviousKnowledge(defs []Generated) bool {
 	return matchesKnowledge(defs, knowledge.PreviousAnchors())
 }

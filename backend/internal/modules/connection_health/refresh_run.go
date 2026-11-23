@@ -667,7 +667,8 @@ func adminGroupsRefreshProgressForSyncSites(sites []upstream.SyncSiteResult, con
 		if site.GroupRatesWarning != nil {
 			issues = append(issues, adminGroupsRefreshIssue{SiteID: site.SiteID, SiteName: names[site.SiteID], Phase: "group_rates", Status: site.Status, GroupRatesWarning: site.GroupRatesWarning})
 		}
-		if site.Status == "success" || site.Status == "disabled" {
+		// 禁用站点由同步返回 Status=unavailable、ErrorKey=site_sync_disabled，不是同步失败，不列入进度问题。
+		if site.Status == "success" || site.Status == "disabled" || site.ErrorKey == "site_sync_disabled" {
 			continue
 		}
 		issues = append(issues, adminGroupsRefreshIssue{

@@ -41,6 +41,7 @@ export const claudeFableMythosDates = [
 
 export function knowledgeDateComparison(model: string, knowledge: KnowledgeVerdict): string | undefined {
   if (knowledge.status === 'not_selected' || knowledge.status === 'not_applicable') return;
+  if (knowledge.boundary_review?.method === 'model_group') return;
 
   const name = model.trim().toLowerCase().replace(/^[^/]+\//, '');
   const normalized = name.replace(/[^a-z0-9]/g, '');
@@ -110,6 +111,10 @@ export function knowledgeDateComparison(model: string, knowledge: KnowledgeVerdi
 }
 
 export function boundaryReviewText(reason: string, method?: string, crossYearLimit?: 10 | 16): string {
+  if (method === 'model_group') {
+    if (reason === 'invalid') return '本轮有题目未完成或回答无效，请展开查看具体原因并补测。';
+    return '';
+  }
   if (method === 'cross_year') {
     const reasons: Record<string, string> = {
       two_unknown: '有两道日期接近的事件均明确回答不知道。可展开查看题目和回答。',

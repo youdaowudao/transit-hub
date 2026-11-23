@@ -15,12 +15,8 @@ import (
 func TestReviewedKnowledgeUsesOriginalRequestsAndPersistsFailure(t *testing.T) {
 	for _, blank := range []bool{false, true} {
 		t.Run(fmt.Sprint(blank), func(t *testing.T) {
-			var defs []questions.Definition
-			for _, q := range questions.Presets() {
-				if q.Kind == "knowledge" {
-					defs = append(defs, q)
-				}
-			}
+			// 本用例固定 v6 题库，验证旧报告仍按原规则执行。
+			defs := questions.CurrentKnowledge()
 			s, o, id, cred := configuredReport(t, defs, "gpt-6-astra")
 			_, snap, e := s.LoadRun(t.Context(), o, id)
 			if e != nil {

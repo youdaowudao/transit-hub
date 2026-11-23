@@ -146,6 +146,20 @@ func CurrentAnchors() []Probe {
 	return out
 }
 
+// ModelAnchors 在 v6 题库后加入型号核对所需的题，不改变旧版搜索题库。
+func ModelAnchors() []Probe {
+	out := CurrentAnchors()
+	for _, e := range previousEvents {
+		if e.ID == "milano_2026_men_skate" {
+			out = append(out, e.Probe)
+		}
+	}
+	for _, e := range modelEvents {
+		out = append(out, e.Probe)
+	}
+	return out
+}
+
 // ReplacedAnchorID returns the v5 ID replaced by a v6 default.
 func ReplacedAnchorID(id string) (string, bool) {
 	for oldID, replacement := range eventReplacements {
@@ -182,7 +196,7 @@ func IsSupplement(id string) bool {
 }
 
 func eventByID(id string) (currentEvent, bool) {
-	for _, bank := range [][]currentEvent{previousEvents, currentEvents} {
+	for _, bank := range [][]currentEvent{previousEvents, currentEvents, modelEvents} {
 		for _, e := range bank {
 			if e.ID == id {
 				return e, true

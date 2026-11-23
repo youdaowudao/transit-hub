@@ -467,7 +467,7 @@ export default function ResultCards({
       )}
       <section className="result-card knowledge-card">
         <div className="rc-head">
-          <h3>{tr("知识截止日期")}</h3>
+          <h3>{tr(review?.method === "model_group" ? "知识检测按型号核对" : "知识截止日期")}</h3>
           <span className="card-number">{tr("说明")}</span>
         </div>
         {sectionContent?.knowledge !== undefined ? sectionContent.knowledge : !knowledge ? (
@@ -477,7 +477,7 @@ export default function ResultCards({
         ) : (
           <>
             <div className="metric-line">
-              <strong className={knowledge.correct && !legacyUnknownPair ? "good" : "warn"}>
+              <strong className={review?.method === "model_group" ? knowledge.status === "matched" && review.reason !== "retry_pending" ? "good" : "warn" : knowledge.correct && !legacyUnknownPair ? "good" : "warn"}>
                 {legacyUnknownPair ? tr("两道事件均回答不知道") : knowledgeLabel(knowledge, tr)}
               </strong>
               <span>{tr("客观事件")}</span>
@@ -503,6 +503,7 @@ export default function ResultCards({
               <ul className="knowledge-ladder" ref={eventList}>
                 {eventRows.map(row => {
                   const mark = knowledgeMark(row, tr);
+                  if (review?.method === "model_group" && row.kind === "know") mark.text = tr("答对");
                   const needsReview = reviewedRows.includes(row);
                   const guessed = knowledge.guessed?.some(candidate => candidate.id === row.id);
                   return <li key={row.id}>

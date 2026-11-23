@@ -129,7 +129,7 @@ func (s *Store) CreateReport(ctx context.Context, o Owner, r CreateRequest) (Rep
 				continue
 			}
 			defs = append(defs, q)
-			if len(defs) > 128 {
+			if len(defs) > 128+len(questions.ModelAdditionIDs()) {
 				rows.Close()
 				return Fail(422, "本次选择超过128项，请减少检测项", "create")
 			}
@@ -139,8 +139,27 @@ func (s *Store) CreateReport(ctx context.Context, o Owner, r CreateRequest) (Rep
 			return e
 		}
 		rows.Close()
+		// 板块选择遇到用户修改过的题库时，保留旧的逐题范围；新增默认题只有明确选择才加入。
+		fullModelBank := len(ids) == 0 && questions.MatchesModelDefinitions(defs)
+		if len(ids) == 0 && !fullModelBank {
+			filtered := defs[:0]
+			for _, q := range defs {
+				if questions.IsUntouchedModelAddition(q) {
+					continue
+				}
+				filtered = append(filtered, q)
+			}
+			defs = filtered
+		}
 		if r.SingleAsk != nil {
 			defs = []questions.Definition{{ID: "custom:" + r.ReportID, Title: "单问单答", Kind: "iq", Enabled: true, Order: 100, Template: r.SingleAsk.Prompt, Parameters: map[string]any{"generator": "static"}, Judge: questions.Judge{Type: "manual"}}}
+		}
+		countedDefs := len(defs)
+		if fullModelBank && r.SingleAsk == nil {
+			countedDefs -= len(questions.ModelAdditionIDs())
+		}
+		if countedDefs > 128 {
+			return Fail(422, "本次选择超过128项，请减少检测项", "create")
 		}
 		if len(defs) == 0 {
 			return Fail(422, "没有可执行的题目，请在设置中新增或启用题目并重新选择", "create")
@@ -153,7 +172,9 @@ func (s *Store) CreateReport(ctx context.Context, o Owner, r CreateRequest) (Rep
 		}
 		paperSeed := int64(binary.LittleEndian.Uint64(paperSeedBytes[:]) & 0x1fffffffffffff)
 		for _, q := range defs {
-			counts[q.Kind]++
+			if q.Kind != "knowledge" || !questions.IsModelAddition(q.ID) {
+				counts[q.Kind]++
+			}
 			if limit := enabledQuestionLimit(q.Kind); limit > 0 && counts[q.Kind] > limit {
 				return Fail(422, "推理题最多启用32道，知识题最多启用40道。请在检测设置禁用多余题目后重试，未创建报告或发送请求。", "create")
 			}
@@ -208,6 +229,7 @@ func (s *Store) CreateReport(ctx context.Context, o Owner, r CreateRequest) (Rep
 		if e != nil {
 			return e
 		}
+		unasked := map[string]bool{}
 		if r.SingleAsk != nil {
 			if _, err := tx.ExecContext(ctx, `UPDATE hub_reports SET summary_json='{"singleAsk":true}' WHERE report_id=?`, r.ReportID); err != nil {
 				return err
@@ -215,9 +237,32 @@ func (s *Store) CreateReport(ctx context.Context, o Owner, r CreateRequest) (Rep
 		} else {
 			verdict := api.Verdict{ScoringVersion: api.HubScoringVersion}
 			initial := map[string]any{}
-			if questions.MatchesCurrentKnowledge(snap.Questions) {
+			if group, ok := knowledge.GroupForModel(r.Model); ok && questions.MatchesModelKnowledge(snap.Questions) {
+				initialKnowledge := knowledge.ModelGroupVerdict(group, nil, "", 0)
+				initialKnowledge.Reason = "型号题组尚未完成，可查看检测状态和已保存的回答。"
+				if len(group.Know) == 0 {
+					initialKnowledge.Reason += "该型号的证明题尚未补齐，暂无法确认。"
+				}
+				initialKnowledge.BoundaryReview.Reason = "pending"
+				verdict.Knowledge = initialKnowledge
+				initial["knowledge"] = verdict.Knowledge
+				selected := map[string]bool{}
+				for _, eventID := range append(append([]string{}, group.Know...), group.Newer...) {
+					selected["knowledge:"+eventID] = true
+				}
+				for _, q := range snap.Questions {
+					if q.Definition.Kind == "knowledge" && !selected[q.Definition.ID] {
+						unasked[q.Definition.ID] = true
+					}
+				}
+			} else if questions.MatchesCurrentKnowledge(snap.Questions) || questions.MatchesModelKnowledge(snap.Questions) {
 				verdict.Knowledge = knowledge.InitialCrossYear()
 				initial["knowledge"] = verdict.Knowledge
+				if questions.MatchesModelKnowledge(snap.Questions) {
+					for _, itemID := range questions.ModelAdditionIDs() {
+						unasked[itemID] = true
+					}
+				}
 			}
 			initial["verdict"] = verdict
 			summary, err := json.Marshal(initial)
@@ -234,7 +279,12 @@ func (s *Store) CreateReport(ctx context.Context, o Owner, r CreateRequest) (Rep
 			if len(g.Image) > 0 {
 				image = g.Image
 			}
-			if _, e = tx.ExecContext(ctx, `INSERT INTO hub_items(report_id,item_id,section_id,order_index,status,question_json,image) VALUES(?,?,?,?,'queued',?,?)`, r.ReportID, g.Definition.ID, g.Definition.Kind, i, string(raw), image); e != nil {
+			status, result := "queued", "{}"
+			if unasked[g.Definition.ID] {
+				status = "done"
+				result = `{"judgment":{"status":"not_asked","reason":"本轮不会提问这道题，不算答错。"}}`
+			}
+			if _, e = tx.ExecContext(ctx, `INSERT INTO hub_items(report_id,item_id,section_id,order_index,status,result_json,question_json,image) VALUES(?,?,?,?,?,?,?,?)`, r.ReportID, g.Definition.ID, g.Definition.Kind, i, status, result, string(raw), image); e != nil {
 				return e
 			}
 		}

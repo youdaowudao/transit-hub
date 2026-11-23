@@ -189,6 +189,9 @@ func (s *Store) RetryReport(ctx context.Context, o Owner, r RetryRequest) (Repor
 			if review, ok := k["boundary_review"].(map[string]any); ok {
 				review["status"], review["reason"] = "unconfirmed", "retry_pending"
 				k["label"] = "日期边界未确认"
+				if review["method"] == knowledge.ModelGroupMethod {
+					k["status"], k["label"] = "unknown", "型号核对未确认"
+				}
 				if review["method"] == knowledge.CrossYearMethod {
 					k["status"] = "unknown"
 					k["label"] = knowledge.InitialCrossYear().Label

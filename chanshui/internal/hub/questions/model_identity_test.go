@@ -96,6 +96,137 @@ func TestModelIdentityRecognizesUncertaintyInAnUnquotedReply(t *testing.T) {
 		})
 	}
 }
+
+func TestModelIdentityGradesNormalizedReplies(t *testing.T) {
+	g := Generated{Definition: Definition{Kind: "iq", MaxScore: 5, Judge: Judge{Type: ModelIdentityJudge}}}
+	type testCase struct {
+		name  string
+		reply string
+		want  int // -1 means the reply is still ungraded.
+	}
+	cases := []testCase{
+		{"production-reply", "我是 OpenAI 的 Codex，基于 GPT\u20116。当前会话没有提供更具体的底层模型版本标识，因此我无法独立核实实际部署的精确型号。未联网。", 5},
+		{"gpt5-before-uncertainty", "我是 GPT\u20115，无法确认具体版本。", 0},
+		{"independent-verification", "因此我无法独立核实实际部署的精确型号", 5},
+		{"alternate-models", "我是 GPT\u20115 或 GPT\u20116", -1},
+		{"other-provider", "我是 Claude，无法独立核实型号", -1},
+		{"conditional", "如果没有版本标识，我无法独立核实型号", -1},
+		{"quoted-model-unquoted-uncertainty", "\"我是 GPT\u20115\"，我无法独立核实型号。", 5},
+		{"quoted-model-and-uncertainty", "\"我是 GPT\u20115，无法独立核实型号。\"", -1},
+		{"reported", "助手说：我无法独立核实型号。", -1},
+		{"reported-after-uncertainty", "我无法独立核实型号，这只是转述。", -1},
+		{"reported-across-sentences", "以下是用户的回答。\n我是 GPT\u20115，无法独立核实型号。", -1},
+		{"two-declarations", "我是 ＧＰＴ－５。我的实际模型是 GPT\u200b-6。", -1},
+		{"bare-model-list", "我是 ＧＰＴ－５，ＧＰＴ－６。", -1},
+		{"alias-alternation", "我是 ＧＰＴ－５ Ｓｏｌ（或 Claude）。", -1},
+		{"preserve-fullwidth-stop", "如果要核对型号，我无法独立核实。我的实际模型是 ＧＰＴ－５。", 0},
+		{"preserve-fullwidth-question", "如果要核对型号？我的实际模型是 ＧＰＴ－５。", 0},
+		{"preserve-fullwidth-exclamation", "如果要核对型号！我的实际模型是 ＧＰＴ－５。", 0},
+		{"preserve-fullwidth-semicolon", "如果要核对型号；我的实际模型是 ＧＰＴ－５。", 0},
+		{"normalized-prefix-before-conditional", "ＧＰＴ 只是名称。如果没有版本标识，我无法独立核实型号。", -1},
+		{"normalized-quoted-prefix", "\"ＧＰＴ－６\"。我的实际模型是 GPT\u20115。", 0},
+		{"fullwidth-digit-before-quote", "我无法确认具体版本。附注１‘仅指小版本’。我是 GPT-5。", 0},
+		{"zero-width-before-quote", "我无法确认具体版本。附注1\u200b‘仅指小版本’。我是 GPT-5。", 0},
+		{"quoted-uncertainty-after-fullwidth-digit", "附注１‘我无法确认具体版本。’", -1},
+		{"quoted-uncertainty-after-zero-width", "附注1\u200b‘我无法确认具体版本。’", -1},
+		{"ascii-digit-before-apostrophe", "附注1‘我无法确认具体版本。’", 5},
+		{"preserve-fullwidth-period", "GPT-6．", -1},
+		{"zero-width-before-comparison", "我无法确认具体版本。\n\u200b> 0 是上面的比较条件。我的实际模型是 GPT-5。", 0},
+		{"original-blockquote", "我无法确认具体版本。\n> 0 是上面的比较条件。我的实际模型是 GPT-5。", 5},
+	}
+	for _, separator := range []rune{'\u2010', '\u2011', '\u2012', '\u2013', '\u2014', '\u2015', '\u2212', '\ufe58', '\ufe63', '\uff0d', '\u00a0', '\u2007', '\u202f', '\u3000'} {
+		for _, model := range []string{"5", "6"} {
+			want := 0
+			if model == "6" {
+				want = 5
+			}
+			reply := "我是 GPT" + string(separator) + model + "。"
+			cases = append(cases, testCase{"separator-" + strconv.FormatInt(int64(separator), 16) + "-gpt" + model, reply, want})
+		}
+	}
+	for _, zeroWidth := range []rune{'\u200b', '\u200c', '\u200d', '\u2060', '\ufeff'} {
+		name := strconv.FormatInt(int64(zeroWidth), 16)
+		cases = append(cases,
+			testCase{"comparison-prefix-" + name, "我无法确认具体版本。\n " + string(zeroWidth) + "> 0 是比较条件。我的实际模型是 GPT-5。", 0},
+			testCase{"comparison-after-quote-" + name, "我无法确认具体版本。\n\"第一行\n附注\"" + string(zeroWidth) + "> 0。我的实际模型是 GPT-5。", 0},
+		)
+		for _, model := range []string{"5", "6"} {
+			want := 0
+			if model == "6" {
+				want = 5
+			}
+			reply := "我是 GPT" + string(zeroWidth) + "-" + model + "。"
+			cases = append(cases, testCase{"zero-width-" + strconv.FormatInt(int64(zeroWidth), 16) + "-gpt" + model, reply, want})
+		}
+	}
+	for _, tc := range []struct {
+		reply string
+		want  int
+	}{
+		{"我是ＧＰＴ－６。", 5}, {"我是ＧＰＴ－５。", 0},
+		{"我是ｇｐｔ－６。", 5}, {"我是ｇｐｔ－５。", 0},
+		{"ＧＰＴ－６", 5}, {"ＧＰＴ－５", 0},
+		{"GPT\u20116", 5}, {"GPT\u20115", 0},
+	} {
+		cases = append(cases, testCase{tc.reply, tc.reply, tc.want})
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := Grade(g, tc.reply)
+			if tc.name == "production-reply" && got.Reason != "未发现自报型号异常，按本题规则得满分；自报不证明实际型号。" {
+				t.Fatalf("wanted the GPT-6 self-report grade, got %+v", got)
+			}
+			if tc.want == -1 {
+				if got.Status != "unknown" || got.Earned != nil {
+					t.Fatalf("wanted an ungraded reply, got %+v", got)
+				}
+			} else if got.Status != "known" || got.Earned == nil || *got.Earned != tc.want {
+				t.Fatalf("wanted %d points, got %+v", tc.want, got)
+			}
+		})
+	}
+}
+
+func TestModelIdentityUncertaintyAllowsLimitedInterveningWords(t *testing.T) {
+	g := Generated{Definition: Definition{Kind: "iq", MaxScore: 5, Judge: Judge{Type: ModelIdentityJudge}}}
+	for _, tc := range []struct {
+		reply string
+		want  int // -1 means the reply is still ungraded.
+	}{
+		{"我无法核验型号。", 5}, {"我无法再确认型号。", 5},
+		{"我不能准确确定型号。", 5}, {"我没法直接核对型号。", 5},
+		{"我无从得知型号。", 5}, {"我难以获知型号。", 5},
+		{"我无法独立知道型号。", 5}, {"我不能判断型号。", 5},
+		{"我无法直接验证型号。", 5}, {"我无法独立核实型号。", 5},
+		{"我无法独立地核实型号。", 5}, {"我无法独立直接核实型号。", 5},
+		{"我无法独立且直接核实型号。", -1}, {"我无法 independently 核实型号。", -1},
+		{"I cannot confirm my model.", 5}, {"I cannot independently verify my model.", 5},
+		{"I can't accurately determine my model.", 5}, {"I am unable to independently know my model.", 5},
+		{"I cannot independently and directly verify my model.", -1},
+		{"I cannot independently directly verify my model.", 5},
+		{"I can’t independently verify my model.", 5},
+		{"If no version is provided, I cannot independently verify my model.", -1},
+		{"I cannot independently verify my model if no version is provided.", -1},
+		{"For example. I cannot independently verify my model.", -1},
+		{"I cannot independently verify my model, the assistant said.", -1},
+		{"\"I cannot independently verify my model.\"", -1},
+		{"I am GPT\u20115. I cannot independently verify my model.", 0},
+		{"I am Claude. I cannot independently verify my model.", -1},
+		{"我提到了 GPT\u20115，但无法独立核实型号。", -1},
+	} {
+		t.Run(tc.reply, func(t *testing.T) {
+			got := Grade(g, tc.reply)
+			if tc.want == -1 {
+				if got.Status != "unknown" || got.Earned != nil {
+					t.Fatalf("wanted an ungraded reply, got %+v", got)
+				}
+			} else if got.Status != "known" || got.Earned == nil || *got.Earned != tc.want {
+				t.Fatalf("wanted %d points, got %+v", tc.want, got)
+			}
+		})
+	}
+}
+
 func TestModelIdentityPresetKeepsExactUserPromptAndFivePoints(t *testing.T) {
 	q, ok := Preset("Q10")
 	if !ok {

@@ -6,7 +6,7 @@ import { HubRequestError } from '../lib/hub-bridge';
 import type { HubCall, HubItem } from '../lib/hub-types';
 import { canRetryHubItem, itemJudgment, itemLabel, itemPoints, object } from '../lib/hub-report-view';
 
-export default function HubQuestionDetails({ item, call, reportId, reportStatus = '', number, onRetry, retryDisabled, onJudged, previous, bodyOnly = false, verifiedScoring = false, cacheEvidenceInline = false }: { item: HubItem; call: HubCall; reportId: string; reportStatus?: string; number?: number; onRetry?: (ids: string[]) => void; retryDisabled?: boolean; onJudged?: () => Promise<void>; previous?: boolean; bodyOnly?: boolean; verifiedScoring?: boolean; cacheEvidenceInline?: boolean }) {
+export default function HubQuestionDetails({ item, call, reportId, reportStatus = '', number, onRetry, retryDisabled, onJudged, previous, bodyOnly = false, verifiedScoring = false, cacheEvidenceInline = false, modelGroup = false }: { item: HubItem; call: HubCall; reportId: string; reportStatus?: string; number?: number; onRetry?: (ids: string[]) => void; retryDisabled?: boolean; onJudged?: () => Promise<void>; previous?: boolean; bodyOnly?: boolean; verifiedScoring?: boolean; cacheEvidenceInline?: boolean; modelGroup?: boolean }) {
   const { t: tr } = useI18n();
   const [image, setImage] = useState(''), [error, setError] = useState('');
   const label = itemLabel(item, reportStatus), points = label === '完成' ? itemPoints(item) : '', result = item.result ?? {}, judgment = itemJudgment(item);
@@ -60,7 +60,7 @@ export default function HubQuestionDetails({ item, call, reportId, reportStatus 
       {!hasAnswer && extract && <><h4>已保存的判定摘录</h4><pre>{extract}</pre></>}
     </>}
     {!knowledge && typeof result.answer === 'string' && <><h4>模型回答</h4><pre>{result.answer || '尚未返回正文'}</pre></>}
-    {item.expected && <><h4>检测端参考答案</h4><p className="muted">{item.definition.judge.type === 'model_identity' ? '本题按检测端规则计分，不调用模型自评。' : knowledge ? '这道知识事件题用于判断日期范围，不计入总分。' : '原版推理题先按本地规则判分，零分时可能调用被测模型自评；识图和自定义题按各自规则处理。'}</p><pre>{item.expected}</pre></>}
+    {item.expected && <><h4>检测端参考答案</h4><p className="muted">{item.definition.judge.type === 'model_identity' ? '本题按检测端规则计分，不调用模型自评。' : knowledge ? modelGroup ? '这道事件题用于核对型号表现，不计入总分。' : '这道知识事件题用于判断日期范围，不计入总分。' : '原版推理题先按本地规则判分，零分时可能调用被测模型自评；识图和自定义题按各自规则处理。'}</p><pre>{item.expected}</pre></>}
     {label === '待人工查看' && <p className="muted">此题只供人工查看，不参与自动得分。</p>}
     {(result.half || judgment.half) && <p className="muted">{verifiedScoring && item.definition.kind === 'iq' ? '本题实际获得的分数计入推理百分制。' : '本题半分只展示卷面，不进入推理通过分子。'}</p>}
     {judgment.reason && <p className="muted">{judgment.reason}</p>}

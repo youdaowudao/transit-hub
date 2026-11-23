@@ -977,3 +977,68 @@ func TestRefreshHandlerPublishesHeartbeatWithoutEndingBlockedRun(t *testing.T) {
 		}
 	}
 }
+
+// 上游站点同步对禁用站点返回 Status=unavailable、ErrorKey=site_sync_disabled（upstream/service.go）。
+// 手动刷新的进度区“本轮已记录问题”不得把它列为同步失败；启用站点的真实同步失败仍要列出。
+func TestRefreshRunProgressIssuesSkipDisabledSitesWithRealSyncResult(t *testing.T) {
+	connections := []my_sites.RealConnection{
+		snapshotConnection("account-ok", "site-ok", "key-ok"),
+		snapshotConnection("account-disabled", "site-disabled", "key-disabled"),
+		snapshotConnection("account-down", "site-down", "key-down"),
+	}
+	reader := &snapshotMetadataReader{
+		fakeMySitesReader: fakeMySitesReader{connections: connections, session: upstream.Session{Platform: upstream.PlatformSub2API}},
+		directItems: map[string]upstream.Sub2APIKeyItem{
+			"site-ok|key-ok":     {ID: "key-ok", GroupID: "group-1", GroupName: "vip"},
+			"site-down|key-down": {ID: "key-down", GroupID: "group-1", GroupName: "vip"},
+		},
+	}
+	service := newAdminGroupsService(fakePlatformGroupReader{}, reader, newFakeRepository())
+	service.sites = snapshotSiteLookup{sites: map[string]*upstream.Site{
+		"site-ok":       snapshotSite("site-ok"),
+		"site-disabled": disabledSnapshotSite("site-disabled"),
+		"site-down":     snapshotSite("site-down"),
+	}}
+	service.SetUpstreamSyncCoordinator(&recordingUpstreamSyncCoordinator{results: []upstream.SyncSiteResult{
+		{SiteID: "site-ok", Status: "success"},
+		{SiteID: "site-disabled", Status: "unavailable", ErrorKey: "site_sync_disabled"},
+		{SiteID: "site-down", Status: "unavailable", ErrorKey: "site_sync_network"},
+	}})
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		_ = service.Shutdown(ctx)
+	})
+
+	run, disposition, err := service.startOrJoinAdminGroupsRefreshRun(context.Background(), "user1", adminGroupsRefreshModeManual)
+	if err != nil || disposition != adminGroupsRefreshRunStarted {
+		t.Fatalf("start manual run disposition=%v err=%v", disposition, err)
+	}
+	snapshot, ok := waitForRefreshRunSnapshot(run, 2*time.Second, func(snapshot adminGroupsRefreshSnapshot) bool {
+		return snapshot.Terminal != nil
+	})
+	if !ok {
+		t.Fatalf("manual run did not reach terminal: %#v", snapshot)
+	}
+	foundDown := false
+	for _, issue := range snapshot.Issues {
+		if issue.SiteID == "site-disabled" || issue.ErrorKey == "site_sync_disabled" {
+			t.Fatalf("disabled site listed as progress issue: %#v", snapshot.Issues)
+		}
+		if issue.SiteID == "site-down" && issue.Phase == "site_sync" && issue.ErrorKey == "site_sync_network" {
+			foundDown = true
+		}
+	}
+	if !foundDown {
+		t.Fatalf("enabled site sync failure missing from progress issues: %#v", snapshot.Issues)
+	}
+	disabledInSummary := false
+	for _, site := range snapshot.Terminal.Refresh.Sites {
+		if site.SiteID == "site-disabled" {
+			disabledInSummary = site.Status == "disabled" && site.ErrorKey == "site_sync_disabled"
+		}
+	}
+	if !disabledInSummary {
+		t.Fatalf("terminal summary must keep disabled site as disabled: %#v", snapshot.Terminal.Refresh.Sites)
+	}
+}

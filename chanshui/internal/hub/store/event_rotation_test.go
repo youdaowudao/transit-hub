@@ -158,8 +158,8 @@ func TestKnowledgeV6SupplementsPreserveWorkspacesAndUseFortyQuestionLimit(t *tes
 	}
 	defer upgraded.Close()
 	var version int
-	if err := upgraded.db.QueryRow("PRAGMA user_version").Scan(&version); err != nil || version != 6 {
-		t.Fatalf("expected v6: %d (%v)", version, err)
+	if err := upgraded.db.QueryRow("PRAGMA user_version").Scan(&version); err != nil || version != schemaVersion {
+		t.Fatalf("expected current version: %d (%v)", version, err)
 	}
 	for _, owner := range []Owner{testOwner, {"user-A", "another-workspace"}} {
 		for _, id := range []string{january, march} {
@@ -187,7 +187,7 @@ func TestKnowledgeV6SupplementsPreserveWorkspacesAndUseFortyQuestionLimit(t *tes
 	}
 	enabled := 0
 	for _, row := range page.Items {
-		if row.Enabled {
+		if row.Enabled && !questions.IsModelAddition(row.ID) {
 			enabled++
 		}
 	}
@@ -332,8 +332,8 @@ func TestEventRotationPreservesCustomizationAndFrozenQueue(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer upgraded.Close()
-	for owner, want := range map[Owner]int{testOwner: 27, edited: 19, disabled: 19, deleted: 18, added: 20} {
-		page, err := upgraded.ListQuestions(t.Context(), owner, Filters{Kind: "knowledge", Limit: 32})
+	for owner, want := range map[Owner]int{testOwner: 27 + len(questions.ModelAdditionIDs()), edited: 19 + len(questions.ModelAdditionIDs()), disabled: 19 + len(questions.ModelAdditionIDs()), deleted: 18 + len(questions.ModelAdditionIDs()), added: 20 + len(questions.ModelAdditionIDs())} {
+		page, err := upgraded.ListQuestions(t.Context(), owner, Filters{Kind: "knowledge", Limit: 50})
 		if err != nil || len(page.Items) != want {
 			t.Fatalf("owner %v has %d events, want %d: %v", owner, len(page.Items), want, err)
 		}

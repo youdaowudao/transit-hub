@@ -1,6 +1,7 @@
 package questions
 
 import (
+	"encoding/json"
 	"fmt"
 	"math/rand"
 	"strings"
@@ -43,9 +44,9 @@ func Presets() []Definition {
 		out[i].Order = int(out[i].ID[1]-'0') * 100
 	}
 	add("vision", "K线读数", "vision", "", map[string]any{"generator": "chart_v1", "lines": iq.ChartPanelTemplates()}, 20, Judge{Type: "legacy", ExpectedFrom: "generator"})
-	events := CurrentKnowledge()
+	events := ModelKnowledge()
 	out = append(out, events...)
-	orderOffset = (len(events) - len(knowledge.Anchors)) * 100
+	orderOffset = (len(CurrentKnowledge()) - len(knowledge.Anchors)) * 100
 	add("tools", "工具调用检测", "tools", toolsTemplate, map[string]any{"generator": "tools_v1", "lhs": 17, "rhs": 25}, 0, Judge{Type: "manual"})
 	add("cache", "缓存读写验证", "cache", "", map[string]any{"generator": "cache_v1", "prefixHeading": "Stable agent brief. Keep this document byte-for-byte identical across turns.", "prefixLineTemplate": "Cache prefix sentence {{index}} remains byte for byte identical.", "turnTemplate": "Continue the same document. Do not rewrite earlier turns. Reply with only noted-{{turn}}."}, 0, Judge{Type: "manual"})
 	out[len(out)-1].Enabled = false
@@ -62,7 +63,7 @@ func Presets() []Definition {
 }
 func Preset(id string) (Definition, bool) {
 	if strings.HasPrefix(id, "knowledge:") {
-		for _, bank := range []func() []Definition{CurrentKnowledge, PreviousKnowledge, LegacyKnowledge} {
+		for _, bank := range []func() []Definition{ModelKnowledge, CurrentKnowledge, PreviousKnowledge, LegacyKnowledge} {
 			for _, q := range bank() {
 				if q.ID == id {
 					return q, true
@@ -93,6 +94,63 @@ func LegacyKnowledge() []Definition {
 // CurrentKnowledge returns the refreshed defaults, placing supplemental dates in existing gaps.
 func CurrentKnowledge() []Definition {
 	return knowledgeDefinitions(knowledge.CurrentAnchors())
+}
+
+// ModelKnowledge 保留 v6 题目的原定义，仅为新增题分配顺序。
+func ModelKnowledge() []Definition {
+	defs := CurrentKnowledge()
+	known := map[string]bool{}
+	for _, q := range defs {
+		known[q.ID] = true
+	}
+	for _, p := range knowledge.ModelAnchors() {
+		if !known["knowledge:"+p.ID] {
+			defs = append(defs, knowledgeDefinition(p, 5000+len(defs)))
+		}
+	}
+	return defs
+}
+
+// ModelAdditionIDs 是 v7 新增的默认题，不占用原有 40 道题的额度。
+var modelAdditionIDs = func() []string {
+	old := map[string]bool{}
+	for _, q := range CurrentKnowledge() {
+		old[q.ID] = true
+	}
+	var ids []string
+	for _, q := range ModelKnowledge() {
+		if !old[q.ID] {
+			ids = append(ids, q.ID)
+		}
+	}
+	return ids
+}()
+
+func ModelAdditionIDs() []string {
+	return append([]string(nil), modelAdditionIDs...)
+}
+
+func IsModelAddition(id string) bool {
+	for _, candidate := range modelAdditionIDs {
+		if candidate == id {
+			return true
+		}
+	}
+	return false
+}
+
+func IsUntouchedModelAddition(q Definition) bool {
+	if q.Kind != "knowledge" || q.Revision != 1 || !IsModelAddition(q.ID) {
+		return false
+	}
+	preset, ok := Preset(q.ID)
+	if !ok {
+		return false
+	}
+	q.Revision = 0
+	actual, _ := json.Marshal(q)
+	expected, _ := json.Marshal(preset)
+	return string(actual) == string(expected)
 }
 
 // PreviousKnowledge returns the exact v5 defaults and order for migration and saved reports.

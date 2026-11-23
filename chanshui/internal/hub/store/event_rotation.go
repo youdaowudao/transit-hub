@@ -11,7 +11,7 @@ import (
 	"github.com/kiss-kedaya/chanshui/internal/knowledge"
 )
 
-const schemaVersion = 6
+const schemaVersion = 7
 
 func (s *Store) migrate(ctx context.Context) error {
 	conn, err := s.db.Conn(ctx)
@@ -59,10 +59,30 @@ func (s *Store) migrate(ctx context.Context) error {
 			return migrationFailure(err)
 		}
 	}
-	if err = refreshKnowledgeDefaults(ctx, conn); err != nil {
-		return migrationFailure(err)
+	if version < 6 {
+		if err = refreshKnowledgeDefaults(ctx, conn); err != nil {
+			return migrationFailure(err)
+		}
 	}
-	if _, err = conn.ExecContext(ctx, "PRAGMA user_version=6"); err != nil {
+	if version < 7 {
+		old := map[string]bool{}
+		for _, q := range questions.CurrentKnowledge() {
+			old[q.ID] = true
+		}
+		for _, q := range questions.ModelKnowledge() {
+			if old[q.ID] {
+				continue
+			}
+			raw, marshalErr := json.Marshal(q)
+			if marshalErr != nil {
+				return migrationFailure(marshalErr)
+			}
+			if _, err = conn.ExecContext(ctx, `INSERT OR IGNORE INTO hub_questions SELECT user_id,workspace_id,?,?,1 FROM hub_settings`, q.ID, string(raw)); err != nil {
+				return migrationFailure(err)
+			}
+		}
+	}
+	if _, err = conn.ExecContext(ctx, "PRAGMA user_version=7"); err != nil {
 		return migrationFailure(err)
 	}
 	if _, err = conn.ExecContext(ctx, "COMMIT"); err != nil {

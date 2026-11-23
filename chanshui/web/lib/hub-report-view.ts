@@ -225,7 +225,9 @@ export function hubReportView(report: HubReport, items: HubItem[], complete: boo
  const nativeProbes:Probe[]=[];
  const statusTexts: Record<string, string> = {};
  const grouped=new Set<string>();
- const sectionNames:Record<string,string>={fingerprint:'模型指纹归因',injection:'注入大小',cache:'缓存读写验证',tools:'工具调用检测',web:'联网检测',knowledge:'知识截止日期',thinking:'思维链回传',vision:'识图能力'};
+ const knowledgeMethod = object(v.knowledge?.boundary_review).method;
+ const modelBank = knowledgeMethod === 'model_group' || knowledgeMethod === 'cross_year' && items.some(item => item.itemId === 'knowledge:venezuela_2026_custody');
+ const sectionNames:Record<string,string>={fingerprint:'模型指纹归因',injection:'注入大小',cache:'缓存读写验证',tools:'工具调用检测',web:'联网检测',knowledge:object(v.knowledge?.boundary_review).method === 'model_group' ? '知识检测按型号核对' : '知识截止日期',thinking:'思维链回传',vision:'识图能力'};
  for(const item of items) {
   const kind=item.definition.kind.startsWith('fingerprint_')?'fingerprint':item.definition.kind;
   if(kind==='thinking' && !report.model.toLowerCase().replace(/^[^/]+\//,'').startsWith('claude-')) continue;
@@ -235,7 +237,7 @@ export function hubReportView(report: HubReport, items: HubItem[], complete: boo
   if(!individual) grouped.add(kind);
   const rows=individual?[item]:(view.groups[kind]??[item]).filter(x=>x.definition.kind!=='fingerprint_behavior');
   const ended=isHubTerminal(report.status), pending=rows.some(x=>x.status==='running'||x.status==='queued');
-  const observed=rows.some(x=>['done','error'].includes(x.status));
+  const observed=rows.some(x=>['done','error'].includes(x.status) && !(kind === 'knowledge' && modelBank && ['not_asked','not_applicable'].includes(itemJudgment(x).status ?? '')));
   const failed=rows.some(x=>x.status==='error'||x.result?.error) || kind==='knowledge' && object(v.knowledge).status==='error';
   if (isUnconfirmedSelfReport(item)) statusTexts[item.itemId] = '尚未确认';
   const status=pending&&!ended?(observed||rows.some(x=>x.status==='running')?'running':'queued'):failed?'error':pending?'cancelled':'done';
@@ -249,6 +251,8 @@ export function hubReportView(report: HubReport, items: HubItem[], complete: boo
 
 export interface ItemReadState { cursor: string; batches: number; ids: Set<string>; cursors: Set<string>; complete: boolean }
 export const newItemRead = (): ItemReadState => ({ cursor: '', batches: 0, ids: new Set(), cursors: new Set(), complete: false });
+// 完整默认题库最多额外保留 13 道型号候选；普通题目上限仍为 128。
+const maxReportItems = 128 + 13;
 export async function readReportItems(call: import('./hub-types').HubCall, id: string, state: ItemReadState, current: () => boolean, onPage: (items: HubItem[]) => void) {
   while (current()) {
     const cursor = state.cursor;
@@ -256,7 +260,7 @@ export async function readReportItems(call: import('./hub-types').HubCall, id: s
     const page = await call<import('./hub-types').HubPage<HubItem>>('items', { reportId: id, cursor, limit: 5 });
     if (!current()) return;
     const rows = page.items ?? [], fresh = rows.filter(i => !state.ids.has(i.itemId));
-    if (state.ids.size + fresh.length > 128) throw new Error('报告超过128项，已保留已读取内容；请核查此报告的数据来源后重试读取。');
+    if (state.ids.size + fresh.length > maxReportItems) throw new Error(`报告超过${maxReportItems}项，已保留已读取内容；请核查此报告的数据来源后重试读取。`);
     if (page.nextCursor && (!fresh.length || state.cursors.has(page.nextCursor) || page.nextCursor === cursor)) throw new Error('报告回答没有前进到下一批，已停止继续读取；已读内容仍可查看，请核查运行状态后重试读取。');
     state.cursors.add(cursor); rows.forEach(i => state.ids.add(i.itemId)); state.batches++;
     onPage(rows);

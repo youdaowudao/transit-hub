@@ -243,6 +243,25 @@ describe('原版报告恢复的业务回归', () => {
     current = false; release({ items: [item] }); await read
     expect(applied).toHaveLength(1)
   })
+  it('141 项报告可全部读取并启用失败项补测，超过上限仍停止', async () => {
+    const items = restorationItems(141)
+    items[0].status = 'error'; items[0].result = { error: '上游未回答', judgment: { status: 'unknown' } }
+    const calls = await openReport(restorationReport({ status: 'partial', processExited: true }), items)
+    for (let i = 0; i < 40 && calls.filter(call => call.op === 'items').length < 29; i++) await act()
+    await settle()
+    expect(calls.filter(call => call.op === 'items')).toHaveLength(29)
+    expect(container.textContent).toContain('紧凑题目141')
+    const retry = [...container.querySelectorAll<HTMLButtonElement>('button')].find(button => button.textContent?.includes('补测失败项'))!
+    expect(retry.disabled).toBe(false)
+    expect(retry.textContent).toContain('（1）')
+
+    const tooMany = restorationItems(142)
+    const read = vi.fn(async (_op: string, params: { cursor?: string }) => {
+      const offset = Number(params.cursor || 0)
+      return { items: tooMany.slice(offset, offset + 5), ...(offset + 5 < tooMany.length ? { nextCursor: String(offset + 5) } : {}) }
+    })
+    await expect(readReportItems(read as any, 'fixture', newItemRead(), () => true, () => {})).rejects.toThrow('超过141项')
+  })
   it('GPT不新增原版没有的思维链卡片，不适用项目仍能在原进度区折叠查看', async () => {
     const items = restorationItems(1)
     items.push({ ...items[0], itemId: 'thinking', definition: { ...items[0].definition, id: 'thinking', title: '思维摘要检测', kind: 'thinking', maxScore: 0, judge: { type: 'manual' } }, result: { judgment: { status: 'not_applicable', reason: '本项仅适用于Claude' } } })

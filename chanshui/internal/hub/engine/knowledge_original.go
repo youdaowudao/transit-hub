@@ -17,6 +17,9 @@ import (
 // Complete built-in catalogues use the original serial request loop. The
 // observers only attach item ownership, attempts and storage.
 func originalKnowledge(ctx context.Context, s *store.Store, o store.Owner, id string, defs []questions.Generated, allDefs []questions.Generated, previous map[string]any, crossYear, previousCrossYear bool, g gateway.Client, timeout int, model string, retry *store.Retry, execute func(questions.Generated) (itemResult, error), results map[string]itemResult, mu *sync.Mutex, fail func(error), notify func(string, map[string]any)) (map[string]any, error) {
+	if asMap(previous["boundary_review"])["method"] == knowledge.ModelGroupMethod {
+		return modelKnowledge(ctx, s, o, id, defs, allDefs, model, asMap(previous["boundary_review"]), retry, g.ProtocolFor(model), execute, results, mu)
+	}
 	byPrompt := map[string]questions.Generated{}
 	byID := map[string]bool{}
 	for _, q := range defs {
@@ -139,6 +142,9 @@ func originalKnowledge(ctx context.Context, s *store.Store, o store.Owner, id st
 				if seen[q.Definition.ID] {
 					continue
 				}
+				if crossYear && questions.MatchesModelKnowledge(allDefs) && questions.IsModelAddition(q.Definition.ID) {
+					continue
+				}
 				reason := skipReason
 				if crossYear && questions.Text(q.Definition.Parameters, "date") > roundDate {
 					reason = "此事件日期晚于今天，本轮不提问"
@@ -242,6 +248,68 @@ func originalKnowledge(ctx context.Context, s *store.Store, o store.Owner, id st
 		}
 	}
 	return asMap(verdict), executionErr
+}
+
+func modelKnowledge(ctx context.Context, s *store.Store, o store.Owner, reportID string, defs, allDefs []questions.Generated, model string, review map[string]any, retry *store.Retry, protocol string, execute func(questions.Generated) (itemResult, error), results map[string]itemResult, mu *sync.Mutex) (map[string]any, error) {
+	// Use the group saved when the report was created; fall back for reports saved before groups were recorded.
+	group, ok := knowledge.SavedGroup(review)
+	if !ok {
+		group, ok = knowledge.GroupForModel(model)
+	}
+	if !ok {
+		return nil, fmt.Errorf("本报告的型号题组无法识别，未发送知识题请求")
+	}
+	selected := map[string]bool{}
+	for _, id := range append(append([]string{}, group.Know...), group.Newer...) {
+		selected["knowledge:"+id] = true
+	}
+	var runErr error
+	for _, q := range defs {
+		if !selected[q.Definition.ID] {
+			if retry == nil {
+				continue
+			}
+			judgment := questions.Judgment{Status: "not_asked", Reason: "本题不在本型号题组中，本轮不提问。"}
+			if err := s.SaveItem(ctx, o, reportID, q.Definition.ID, "done", map[string]any{"judgment": judgment}, 0); err != nil {
+				runErr = err
+				break
+			}
+			mu.Lock()
+			results[q.Definition.ID] = itemResult{Judgment: judgment, Attempts: results[q.Definition.ID].Attempts}
+			mu.Unlock()
+			continue
+		}
+		if _, err := execute(q); err != nil {
+			runErr = err
+			break
+		}
+	}
+	var rows []knowledge.Row
+	attempts := 0
+	mu.Lock()
+	for _, q := range allDefs {
+		if !selected[q.Definition.ID] {
+			continue
+		}
+		result, exists := results[q.Definition.ID]
+		if !exists || result.Judgment.Status == "not_asked" || result.Judgment.Status == "not_applicable" {
+			continue
+		}
+		p, ok := questions.OriginalKnowledge(q.Definition)
+		if !ok {
+			continue
+		}
+		var row knowledge.Row
+		raw, _ := json.Marshal(asMap(result.Evidence)["row"])
+		_ = json.Unmarshal(raw, &row)
+		if row.ID == "" {
+			row = knowledge.Observe(p, result.Answer, result.Error)
+		}
+		rows = append(rows, row)
+		attempts += result.Attempts
+	}
+	mu.Unlock()
+	return asMap(knowledge.ModelGroupVerdict(group, rows, protocol, attempts)), runErr
 }
 
 func hasCrossYearMethod(summary map[string]any) bool {

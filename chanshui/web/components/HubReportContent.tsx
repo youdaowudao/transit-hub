@@ -148,25 +148,26 @@ export default function HubReportContent({
     {loadingImages[id] && <p className="muted">正在读取本次已保存图片，不重新检测。</p>}
     {imageErrors[id] && <p className="error-box" role="alert">{imageErrors[id]}</p>}
   </>};
-  const knowledgeDetail=(id:string)=>{const item=items.find(x=>x.itemId===id || x.itemId==='knowledge:'+id);return item ? <HubQuestionDetails bodyOnly item={item} call={call} reportId={report.reportId} reportStatus={report.status} onRetry={onRetry} retryDisabled={retryDisabled} previous={Boolean(report.retry?.itemIds.includes(item.itemId)&&['queued','running'].includes(item.status))}/> : complete ? undefined : <p className="muted">正在读取本题已保存的详细结果，请稍候；不会重新检测。</p>};
+  const knowledgeDetail=(id:string)=>{const item=items.find(x=>x.itemId===id || x.itemId==='knowledge:'+id);return item ? <HubQuestionDetails bodyOnly modelGroup={view.verdict.knowledge?.boundary_review?.method === 'model_group'} item={item} call={call} reportId={report.reportId} reportStatus={report.status} onRetry={onRetry} retryDisabled={retryDisabled} previous={Boolean(report.retry?.itemIds.includes(item.itemId)&&['queued','running'].includes(item.status))}/> : complete ? undefined : <p className="muted">正在读取本题已保存的详细结果，请稍候；不会重新检测。</p>};
   const questions: Record<string, ReactNode> = {};
   const retryRunning = ['queued','running'].includes(report.status);
   const activeKnowledgeRetry = retryRunning &&
     Boolean(view.groups.knowledge?.some(item => report.retry?.itemIds.includes(item.itemId)));
   const knowledgeReview = view.verdict.knowledge?.boundary_review;
   const crossYear = knowledgeReview?.method === 'cross_year';
+  const modelGroup = knowledgeReview?.method === 'model_group';
   const monthlyKnowledge = crossYear && items.some(item => item.itemId === 'knowledge:minnesota_2026_pretti');
   const knowledgeAskLimit = monthlyKnowledge ? 16 : complete ? 10 : undefined;
   const pendingKnowledge = knowledgeReview?.reason === 'retry_pending';
   if (pendingKnowledge && originalVerdict.knowledge) {
     let reason = '补测未完成或未能保存复核结论，请查看最新逐题结果和运行状态。';
     if (activeKnowledgeRetry) {
-      reason = '正在补测知识题，日期边界暂未确认。已保存的回答仍可查看。';
+      reason = modelGroup ? '正在补测知识题，型号核对暂未确认。已保存的回答仍可查看。' : '正在补测知识题，日期边界暂未确认。已保存的回答仍可查看。';
     } else if (!complete && retryRunning) {
       reason = '正在读取本轮补测状态，已保存回答仍可查看。';
     }
     originalVerdict.knowledge = {
-      ...originalVerdict.knowledge, rows: [], guessed: [], label: crossYear ? '知识截止日期未确认' : '日期边界未确认', reason,
+      ...originalVerdict.knowledge, rows: [], guessed: [], label: modelGroup ? '型号核对未确认' : crossYear ? '知识截止日期未确认' : '日期边界未确认', reason,
     };
     view.verdict.knowledge = originalVerdict.knowledge;
   } else if (crossYear && knowledgeReview.status === 'not_needed' && originalVerdict.knowledge &&
@@ -180,7 +181,7 @@ export default function HubReportContent({
   const fp = originalVerdict.fingerprint;
   const overlap = fp && !fp.error && fp.basis === 'numeric' && Number.isInteger(fp.used_outputs) && fp.used_outputs > 0 &&
     fingerprintState(report.model,fp.family || '',fp.top_model || '') === 'unconfirmed';
-  const sharedDate = overlap && knowledge && !['not_selected','not_applicable'].includes(knowledge.status)
+  const sharedDate = !modelGroup && overlap && knowledge && !['not_selected','not_applicable'].includes(knowledge.status)
     ? 'GPT-6 Astra 和 GPT-6.1 Sol 的公开知识截止日期均为 2026-04-30，知识日期无法区分两款。' : '';
   const knowledgeComparison = complete && (report.status === 'done' || report.status === 'partial') && knowledge
     ? knowledgeDateComparison(report.model, knowledge)
@@ -205,8 +206,13 @@ export default function HubReportContent({
         String(a.definition.parameters?.date || '\uffff').localeCompare(String(b.definition.parameters?.date || '\uffff')));
       const skipped=chronological.filter(item=>['not_asked','not_applicable'].includes(itemJudgment(item).status??''));
       const represented=new Set((view.verdict.knowledge?.rows??[]).map(row=>row.id.replace(/^knowledge:/,'')));
-      const extra=chronological.filter(item=>!skipped.includes(item)&&!represented.has(item.itemId.replace(/^knowledge:/,'')));
-      const skippedExplanation = knowledgeAskLimit === 16
+      const unrepresented=chronological.filter(item=>!skipped.includes(item)&&!represented.has(item.itemId.replace(/^knowledge:/,'')));
+      // While detection runs, untouched queued events are only candidates for the search; listing them all stretches the page.
+      const waiting=retryRunning ? unrepresented.filter(item=>item.status==='queued'&&Object.keys(object(item.result)).length===0&&!report.retry?.itemIds.includes(item.itemId)) : [];
+      const extra=unrepresented.filter(item=>!waiting.includes(item));
+      const skippedExplanation = modelGroup
+        ? '本轮只核对该型号的题组，其余题目没有提问，不算答错。'
+        : knowledgeAskLimit === 16
         ? '完整默认题库先问两道 2026 年事件，再按月补问并核实答对的题，每次最多 16 道。展开可查看本轮未选到的题目，未选到的题不算答错。自选题按所选范围检测。'
         : !crossYear
           ? '完整默认题库沿用原程序的串行二分，每次最多提问10道；列表会写明本轮未选到的题目，未选到的题不算答错。自定义或部分选择时按设置执行。'
@@ -217,14 +223,15 @@ export default function HubReportContent({
         <p className="muted">点击上方事件行可查看本题已保存回答，默认收起，不重新检测或修改主站。</p>
         {pendingKnowledge && complete && !activeKnowledgeRetry && extra.some(item => ['queued', 'running'].includes(item.status)) &&
           <p className="muted">下面保留的是停止前保存的结果，未完成题目可按状态补测。</p>}
-        {extra.map(item => <HubQuestionDetails key={item.itemId} item={item} call={call} reportId={report.reportId}
+        {extra.map(item => <HubQuestionDetails key={item.itemId} item={item} modelGroup={modelGroup} call={call} reportId={report.reportId}
           reportStatus={report.status} onRetry={onRetry} retryDisabled={retryDisabled}
           previous={activeKnowledgeRetry && Boolean(report.retry?.itemIds.includes(item.itemId) && ['queued', 'running'].includes(item.status))} />)}
+        {waiting.length > 0 && <p className="muted">{modelGroup ? `另有 ${waiting.length} 道事件题等待处理，本轮只提问该型号的固定题组。` : `另有 ${waiting.length} 道候选事件题，检测会按回答决定是否提问，答完后显示在这里。`}</p>}
         {skipped.length > 0 && <details className="fold">
           <summary>本轮未提问的题目与原因（{skipped.length}）</summary>
           {skippedExplanation && <p className="muted">{skippedExplanation}</p>}
           <div className="question-list">
-            {skipped.map(item => <HubQuestionDetails key={item.itemId} item={item} call={call}
+            {skipped.map(item => <HubQuestionDetails key={item.itemId} item={item} modelGroup={modelGroup} call={call}
               reportId={report.reportId} reportStatus={report.status} />)}
           </div>
         </details>}

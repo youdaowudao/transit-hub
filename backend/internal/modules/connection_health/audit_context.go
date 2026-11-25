@@ -82,7 +82,7 @@ func (s *Service) ListAuditTargets(ctx context.Context, userID string) ([]AuditT
 func (s *Service) ResolveAuditContext(ctx context.Context, userID, targetID, clickedGroupID string, needCredential bool) (AuditContext, error) {
 	session, workspace, accountID, err := s.resolveManualSession(ctx, userID, targetID)
 	if err != nil {
-		return AuditContext{}, fmt.Errorf("无法核实此账号属于当前工作区；请重新打开分组健康并选择账号")
+		return AuditContext{}, fmt.Errorf("无法确认所选账号属于这次工作区，请点击窗口顶部“更新分组和账号”后重新选择；尚未开始检测")
 	}
 	return s.resolveAuditContext(ctx, userID, targetID, clickedGroupID, needCredential, session, workspace, accountID)
 }
@@ -113,7 +113,7 @@ func (s *Service) resolveAuditContext(ctx context.Context, userID, targetID, cli
 		return AuditContext{}, fmt.Errorf("读取账号当前分组信息失败，请检查主站连接后重试；尚未开始检测")
 	}
 	if !refreshed.found || refreshed.accountsReadError {
-		return AuditContext{}, fmt.Errorf("账号已不存在或分组账号清单不完整；请重新加载分组健康后重试，尚未开始检测")
+		return AuditContext{}, fmt.Errorf("账号已不存在或分组账号名单没有读全，请点击窗口顶部“更新分组和账号”后重新选择；仍失败请检查主站连接和后端日志。尚未开始检测")
 	}
 	result := AuditContext{WorkspaceID: workspace, TargetID: targetID, AccountID: accountID, AccountName: refreshed.target.AccountName, ProviderFamily: refreshed.target.ProviderFamily, GroupID: refreshed.target.AdminGroupID, GroupName: refreshed.target.AdminGroupName}
 	if clickedGroupID != "" {
@@ -127,7 +127,7 @@ func (s *Service) resolveAuditContext(ctx context.Context, userID, targetID, cli
 			}
 		}
 		if !found {
-			return AuditContext{}, fmt.Errorf("该账号已不属于点击的分组，请重新打开账号后重试；尚未开始检测")
+			return AuditContext{}, fmt.Errorf("该账号已不属于所选分组，请点击窗口顶部“更新分组和账号”后重新选择；尚未开始检测")
 		}
 	}
 	if err = s.configureTestTarget(ctx, userID, workspace, &refreshed.target, refreshed.memberships, true); err != nil {

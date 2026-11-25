@@ -74,6 +74,7 @@ export function chanshuiRequestSpec(op: string, p: Params = {}): { path: string;
     case 'runtime': return { path: '/runtime', method: 'GET' }
     case 'reference-info': return { path: '/reference-info', method: 'GET' }
     case 'targets': return { path: '/targets', method: 'GET' }
+    case 'catalog': return { path: '/targets?catalog=1', method: 'GET' }
     case 'context': return { path: `/targets/${key(p.targetId)}/context${query({ groupId: p.groupId })}`, method: 'GET' }
     case 'models': return { path: `/targets/${key(p.targetId)}/models`, method: 'POST', body: { groupId: p.groupId, expectedContext: p.expectedContext } }
     case 'reports': return { path: `/reports${query(p)}`, method: 'GET' }
@@ -104,6 +105,9 @@ export async function requestChanshui<T = unknown>(op: string, params: Params, w
   const spec = chanshuiRequestSpec(op, params)
   const token = getAccessToken()
   if (!token) throw new ChanshuiError('登录已失效，请重新登录后打开检测页。', 401)
+  const discardCatalog = () => {
+    if (op === 'catalog' && (signal?.aborted || getAccessToken() !== token)) throw new ChanshuiError('本次分组账号读取已取消，请在当前工作区重新打开模型检测；没有开始检测。')
+  }
   const api = String(import.meta.env.VITE_API_BASE_URL ?? '/api').replace(/\/$/, '')
   let response: Response
   try {
@@ -113,20 +117,34 @@ export async function requestChanshui<T = unknown>(op: string, params: Params, w
       ...(spec.body === undefined ? {} : { body: JSON.stringify(spec.body) }),
     })
   } catch (error) {
+    discardCatalog()
+    if (op === 'catalog') throw new ChanshuiError('无法连接调度站，请检查网络后点击“更新分组和账号”重试；本次没有修改主站或开始检测。')
     if (signal?.aborted) throw new ChanshuiError('页面已关闭或已切换工作区，本次读取已结束。')
     throw new ChanshuiError('无法连接调度站。请检查网络后重试读取；若刚点击开始，请按原报告编号查询，部分请求可能已经计费。')
   }
-  if (response.status === 401) { handleAuthExpired(); throw new ChanshuiError('登录已失效，请重新登录后查看原报告。', 401) }
-  if (response.ok && response.headers.get('Content-Type')?.split(';')[0]?.trim().toLowerCase() === resultContentType) return await readResult(response, spec.image === true, onWarning, op === 'items') as T
+  discardCatalog()
+  if (response.status === 401) { handleAuthExpired(); throw new ChanshuiError(op === 'catalog' ? '调度站登录已失效，请重新登录后读取分组账号；本次没有开始检测。' : '登录已失效，请重新登录后查看原报告。', 401) }
+  if (op !== 'catalog' && response.ok && response.headers.get('Content-Type')?.split(';')[0]?.trim().toLowerCase() === resultContentType) return await readResult(response, spec.image === true, onWarning, op === 'items') as T
   if (spec.image && response.ok) {
     const blob = await response.blob()
     if (blob.size > 2 * 1024 * 1024) throw new ChanshuiError('报告图片超过允许大小，请检查此报告的图片记录。')
     const dataURL = await new Promise<string>((resolve, reject) => { const reader = new FileReader(); reader.onload = () => resolve(String(reader.result)); reader.onerror = reject; reader.readAsDataURL(blob) })
     return { dataURL } as T
   }
-  const text = await response.text()
+  let text: string
+  try { text = await response.text() } catch (error) {
+    if (op !== 'catalog') throw error
+    discardCatalog()
+    throw new ChanshuiError('分组账号名单传输中断或没有读完，请检查网络和后端日志后点击“更新分组和账号”重试；本次没有修改主站或开始检测。', response.status)
+  }
+  discardCatalog()
   let body: Record<string, unknown>
-  try { body = text ? JSON.parse(text) : {} } catch { throw new ChanshuiError(`调度站返回的内容无法读取（HTTP ${response.status}）。请查看运行诊断后重试读取；不要重复新建检测。`, response.status) }
-  if (!response.ok) throw new ChanshuiError(typeof body.message === 'string' ? body.message : `检测操作未完成（HTTP ${response.status}），原因尚未确认；请检查运行诊断后重试。`, response.status, body)
+  try { body = text ? JSON.parse(text) : {} } catch { throw new ChanshuiError(op === 'catalog' ? `分组账号名单回包无法读取（HTTP ${response.status}），请检查后端日志和版本后点击“更新分组和账号”重试；本次没有开始检测。` : `调度站返回的内容无法读取（HTTP ${response.status}）。请查看运行诊断后重试读取；不要重复新建检测。`, response.status) }
+  if (op === 'catalog' && !record(body)) throw new ChanshuiError(`分组账号名单回包格式不正确（HTTP ${response.status}），请检查后端日志和版本后点击“更新分组和账号”重试；本次没有开始检测。`, response.status)
+  if (!response.ok) {
+    let message = typeof body.message === 'string' && (op !== 'catalog' || body.message.trim()) ? body.message : op === 'catalog' ? `读取分组和账号失败（HTTP ${response.status}），原因尚未确认，请检查后端日志后重试；没有开始检测。` : `检测操作未完成（HTTP ${response.status}），原因尚未确认；请检查运行诊断后重试。`
+    if (op === 'catalog' && response.status === 409) message += ' 请刷新页面或重新选择工作区后，再更新分组和账号；本次没有替换已有名单或开始检测。'
+    throw new ChanshuiError(message, response.status, body)
+  }
   return body as T
 }

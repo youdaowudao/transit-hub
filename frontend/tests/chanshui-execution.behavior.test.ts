@@ -202,7 +202,7 @@ describe('检测执行入口与停止后的结果保持', () => {
     expect(s.releaseStart).toBeTypeOf('function')
     s.startProtocol = 'anthropic'
     await act(() => s.releaseStart?.()); await settle()
-    expect(container.textContent).toContain('分组健康名单中的检测协议已变化')
+    expect(container.textContent).toContain('当前名单中的检测协议已变化')
     expect(s.calls.some(c => c.op === 'start')).toBe(false)
     expect(container.querySelector('[aria-label="普通检测受理"]')).toBeNull()
   })

@@ -1,4 +1,5 @@
 import { ref, computed } from 'vue'
+import { getAccessToken } from '@/modules/auth/api/auth'
 import { useRouter } from 'vue-router'
 import type { AdminAccount } from '../types/adminAccounts'
 import {
@@ -13,6 +14,17 @@ import type { DeleteAdminAccountResponse, WorkspaceDeleteConfirmation } from '..
 
 const accounts = ref<AdminAccount[]>([])
 const currentAccount = ref<AdminAccount | null>(null)
+const currentAccountSession = ref<string | null>(null)
+const readSession = (): string | null => { try { return getAccessToken() } catch { return null } }
+const assignCurrentAccount = (account: AdminAccount | null, sourceSession: string | null) => {
+  currentAccountSession.value = null
+  currentAccount.value = account
+  currentAccountSession.value = account ? sourceSession : null
+}
+const isCurrentAccountSession = (workspaceId: string): boolean => {
+  const token = readSession()
+  return Boolean(token && currentAccountSession.value === token && currentAccount.value?.id === workspaceId)
+}
 const isLoading = ref(false)
 const isSwitching = ref(false)
 const isDeleting = ref(false)
@@ -48,20 +60,22 @@ export function useAdminAccounts() {
   }
 
   const loadCurrentAccount = async (): Promise<boolean> => {
+    const sourceSession = readSession()
     try {
-      currentAccount.value = await getCurrentAdminAccount()
+      assignCurrentAccount(await getCurrentAdminAccount(), sourceSession)
       return true
     } catch {
-      currentAccount.value = null
+      assignCurrentAccount(null, null)
       return false
     }
   }
 
   const switchAccount = async (id: string) => {
+    const sourceSession = readSession()
     isSwitching.value = true
     errorKey.value = ''
     try {
-      currentAccount.value = await switchAdminAccount(id)
+      assignCurrentAccount(await switchAdminAccount(id), sourceSession)
       accounts.value = accounts.value.map(a => ({
         ...a,
         current: a.id === id,
@@ -79,12 +93,13 @@ export function useAdminAccounts() {
   }
 
   const renameAccount = async (id: string, displayName: string) => {
+    const sourceSession = readSession()
     errorKey.value = ''
     try {
       const updated = await updateAdminAccount(id, displayName)
       accounts.value = accounts.value.map(a => a.id === id ? updated : a)
       if (currentAccount.value?.id === id) {
-        currentAccount.value = updated
+        assignCurrentAccount(updated, sourceSession)
       }
     } catch (err) {
       errorKey.value = err instanceof Error ? err.message : 'admin.adminAccounts.errors.request'
@@ -95,6 +110,7 @@ export function useAdminAccounts() {
     id: string,
     confirmation: WorkspaceDeleteConfirmation,
   ): Promise<DeleteAdminAccountResponse> => {
+    const sourceSession = readSession()
     isDeleting.value = true
     errorKey.value = ''
     noticeKey.value = ''
@@ -109,7 +125,7 @@ export function useAdminAccounts() {
           ...account,
           current: account.id === response.currentAdminAccountId,
         }))
-        currentAccount.value = accounts.value.find(account => account.id === response.currentAdminAccountId) ?? null
+        assignCurrentAccount(accounts.value.find(account => account.id === response.currentAdminAccountId) ?? null, sourceSession)
         resetWorkspaceCheck()
         markWorkspaceActive()
         if (deletedCurrent) {
@@ -120,7 +136,7 @@ export function useAdminAccounts() {
           ...account,
           current: false,
         }))
-        currentAccount.value = null
+        assignCurrentAccount(null, null)
         resetWorkspaceCheck()
         if (router.currentRoute.value.name !== 'AdminAccounts') {
           await router.push('/admin/accounts')
@@ -144,6 +160,7 @@ export function useAdminAccounts() {
   return {
     accounts,
     currentAccount,
+    isCurrentAccountSession,
     isLoading,
     isSwitching,
     isDeleting,

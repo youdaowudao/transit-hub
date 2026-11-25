@@ -33,8 +33,9 @@ afterEach(async () => { await run(() => root.unmount()); cleanup?.(); cleanup = 
 describe('父页真实HTTP到原检测页面的回收警告', () => {
   it('保存值经Host和实际bridge生效，清理警告可见且关闭时不误报未保存', async () => {
     localStorage.setItem(authTokenStorageKey, 'fixture-token')
-    const host = mount(ChanshuiHost, { attachTo: document.body, props: { workspaceId: 'workspace-a' }, global: { stubs: { Teleport: false } } })
-    cleanup = () => { host.unmount(); localStorage.removeItem(authTokenStorageKey) }
+    localStorage.setItem('transithub.chanshui.catalog.v1:workspace-a', JSON.stringify({ workspaceId: 'workspace-a', groups: [] }))
+    const host = mount(ChanshuiHost, { attachTo: document.body, props: { workspaceId: 'workspace-a', isWorkspaceConfirmed: () => true }, global: { stubs: { Teleport: false } } })
+    cleanup = () => { host.unmount(); localStorage.removeItem(authTokenStorageKey); localStorage.removeItem('transithub.chanshui.catalog.v1:workspace-a') }
     window.dispatchEvent(new CustomEvent(chanshuiOpenEvent, { detail: {} })); await flushPromises()
     const frame = document.querySelector('iframe')!, outgoing: Array<Record<string, any>> = [], incoming: Array<Record<string, any>> = []
     // Deliver each side with its real source identity. Neither origin/source nor

@@ -30,7 +30,7 @@ type StartAction = { scope: HubBoot; target?: DraftAccount };
 // 选中账号后向该账号上游读到的模型列表。key 由刷新计数、分组和账号组成（modelKey）。
 type UpstreamModels = { key: string; status: 'loading' | 'done' | 'failed'; models: string[]; error: string };
 const problem = (error: unknown) => error instanceof HubRequestError ? readableReportError(error.details) || error.message : error instanceof Error ? error.message : '读取检测结果时中断，原因尚未确认；请重试读取，不要重复新建检测。';
-const contextFailure = (reason: string) => `所选账号或协议未通过核对。${reason} 请到分组健康核对配置后再试；本次没有发送问题。`;
+const contextFailure = (reason: string) => `所选账号或协议未通过核对。${reason} 请先点击窗口顶部「更新分组和账号」后重新选择；若仍失败，请按上面的具体原因检查账号或测试协议配置。本次没有发送问题。`;
 const acceptedReport = (result: HubReport, id: string, scope: HubBoot) => {
   const value = object(result), workspace = value.workspaceId ?? object(object(value.request).expectedContext).workspaceId;
   // Older reports do not include a workspace field. The bridge request is scoped to the authenticated workspace.
@@ -374,7 +374,7 @@ export default function HubApp({ initialView = 'new' }: { initialView?: View }) 
     const approveStart: HubStartApproval | undefined = method === 'first' ? protocol => {
       if (!currentAction(kind, action) || !action.target || !visibleRef.current || latestView.current !== 'new' || signal?.aborted) return false;
       if (action.target.protocol !== protocol) {
-        setContextError(contextFailure('分组健康名单中的检测协议已变化。'));
+        setContextError(contextFailure('当前名单中的检测协议已变化。请点击窗口顶部「更新分组和账号」后重新选择；本次没有发送问题。'));
         finishAction(kind, action);
         return false;
       }
@@ -584,7 +584,7 @@ export default function HubApp({ initialView = 'new' }: { initialView?: View }) 
       {view === 'settings' && boot && <HubSettings call={call} onDirtyChange={onDirtyChange} />}
       {view === 'new' && boot && <div className="opening"><AuditHero /><section className="hero-card connection-card hub-card">
         <div className="section-heading"><h1>新建账号检测</h1><span className="muted">只预填，不自动检测</span></div>
-        <p className="muted">分组和账号按分组健康当前名单的顺序列出。选中账号后会向该账号的上游读取模型列表，不会修改主站，也不会开始检测。</p>
+        <p className="muted">分组和账号优先使用上次名单。选中账号后会向该账号的上游读取模型列表，不会修改主站，也不会开始检测。</p>
         <div className="connection-grid">
           <div className="field"><label>分组<Select value={draft.groupId} onChange={e => chooseDraft({ groupId: e.target.value })}>
             <option value="">请选择分组</option>
@@ -595,10 +595,10 @@ export default function HubApp({ initialView = 'new' }: { initialView?: View }) 
             {groupAccounts.map(account => <option key={account.targetId} value={account.targetId}>{`${account.accountName}${account.accountId ? ` #${account.accountId}` : ''}`}</option>)}
           </Select></label></div>
         </div>
-        {!catalog && <p className="muted">请先打开「分组健康」加载当前工作区的名单，再回到这里。此时没有开始检测。</p>}
-        {catalog && groups.length === 0 && <p className="muted">分组健康当前没有显示可选分组。请检查左侧筛选或隐藏设置；此时没有开始检测。</p>}
+        {!catalog && <p className="muted">尚未读到分组和账号。请查看窗口顶部的读取结果，或点击「更新分组和账号」重试；此时没有开始检测。</p>}
+        {catalog && groups.length === 0 && <p className="muted">当前没有可选分组。请核对当前工作区及分组隐藏设置，需要时点击窗口顶部「更新分组和账号」；此时没有开始检测。</p>}
         {draft.selectionError && <p role="status" className="muted">{draft.selectionError}</p>}
-        {group?.accountsError && <p className="hub-error" role="alert">分组健康没有读到这个分组的账号。请选择其他分组，或回到分组健康查看原因并重新加载；本次没有发送问题。</p>}
+        {group?.accountsError && <p className="hub-error" role="alert">上次没有读到这个分组的账号。请选择其他分组，或点击窗口顶部「更新分组和账号」重试；本次没有发送问题。</p>}
         {group && !group.accountsError && groupAccounts.length === 0 && <p className="muted">此分组没有可选账号。请选择其他分组；此时没有开始检测。</p>}
         {isChecking && <p role="status">{checkingContext}</p>}
         {contextError && <p role="alert" className="hub-error">{contextError}</p>}

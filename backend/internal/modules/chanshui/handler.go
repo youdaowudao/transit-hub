@@ -1,8 +1,10 @@
 package chanshui
 
 import (
+	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -12,6 +14,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"transithub/backend/internal/modules/connection_health"
 	"transithub/backend/internal/shared/authctx"
 )
 
@@ -143,6 +146,44 @@ func (s *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if path == "targets" && r.Method == http.MethodGet {
+		for _, parameter := range strings.Split(r.URL.RawQuery, "&") {
+			name, _, _ := strings.Cut(parameter, "=")
+			name, err := url.QueryUnescape(name)
+			if err != nil || name != "catalog" {
+				continue
+			}
+			query, err := url.ParseQuery(r.URL.RawQuery)
+			values := query["catalog"]
+			if err != nil || len(values) != 1 || values[0] != "1" {
+				fail(w, problem(422, "input", "读取分组账号的选项不正确，请重新打开模型检测后更新名单；本次没有开始检测"))
+				return
+			}
+			reader, ok := s.targets.(interface {
+				ListAuditCatalog(context.Context, string, string) (connection_health.AuditCatalog, error)
+			})
+			if !ok {
+				fail(w, problem(503, "catalog", "当前后端版本不能读取独立分组账号名单，请完成整站升级后重试；没有开始检测"))
+				return
+			}
+			catalog, e := reader.ListAuditCatalog(r.Context(), owner.UserID, owner.WorkspaceID)
+			if e != nil {
+				status := 503
+				message := "读取分组和账号失败，后端没有返回可安全展示的具体原因，请检查本次名单读取的后端日志后重试；没有开始检测"
+				var detail *connection_health.AuditCatalogError
+				if errors.As(e, &detail) {
+					status = detail.Status
+					message = detail.Message
+				}
+				fail(w, problem(status, "catalog", message))
+				return
+			}
+			if catalog.WorkspaceID != owner.WorkspaceID {
+				fail(w, problem(409, "catalog", "返回的分组账号名单与这次工作区不一致，请重新选择工作区后重试；本次没有返回名单或开始检测"))
+				return
+			}
+			reply(w, 200, map[string]any{"catalog": catalog})
+			return
+		}
 		items, e := s.targets.ListAuditTargets(r.Context(), owner.UserID)
 		if e != nil {
 			fail(w, problem(503, "account", e.Error()))

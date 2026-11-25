@@ -25,7 +25,7 @@ const isDark = useDark({
 })
 const toggleDark = useToggle(isDark)
 import { t } from '@/locales'
-const { currentAccount, isSwitching, noticeKey, loadCurrentAccount } = useAdminAccounts()
+const { currentAccount, isSwitching, noticeKey, loadCurrentAccount, isCurrentAccountSession } = useAdminAccounts()
 const notifications = useNotifications({
   workspaceId: computed(() => currentAccount.value?.id ?? ''),
   isSwitching,
@@ -189,7 +189,7 @@ watch(
 </script>
 
 <template>
-  <ChanshuiHost :workspace-id="currentAccount?.id ?? ''" />
+  <ChanshuiHost :workspace-id="currentAccount?.id ?? ''" :is-workspace-confirmed="isCurrentAccountSession" />
   <div class="flex h-dvh overflow-hidden overflow-x-hidden bg-background text-foreground">
     <a
       href="#admin-main-content"

@@ -58,6 +58,20 @@ export const modelReadReason = (reason: string, status = 0): string => {
   if (unreadable) return `调度站返回的内容无法读取（HTTP ${unreadable[1]}），请查看运行诊断`;
   return reportOnlyReasons[text] ?? (text.replace(/[。.]+$/, '') || '原因没有返回，请到分组健康核对此账号的地址和密钥');
 };
+// The host republishes its same-scope catalog when the minimized frame opens.
+// Compare public fields in list order, not postMessage object identity/key order.
+export function equivalentCatalog(left: HubCatalog | null, right: HubCatalog | null): boolean {
+  if (left === right) return true;
+  if (!left || !right || left.workspaceId !== right.workspaceId || left.groups.length !== right.groups.length) return false;
+  return left.groups.every((group, i) => {
+    const other = right.groups[i];
+    return group.id === other.id && group.name === other.name && Boolean(group.accountsError) === Boolean(other.accountsError) && group.accounts.length === other.accounts.length && group.accounts.every((account, j) => {
+      const next = other.accounts[j];
+      return account.targetId === next.targetId && account.accountId === next.accountId && account.accountName === next.accountName && account.priority === next.priority && account.models === next.models && account.protocol === next.protocol;
+    });
+  });
+}
+
 export const catalogGroup = (catalog: HubCatalog | null, groupId: string) => catalog?.groups.find(group => group.id === groupId);
 export const catalogAccount = (catalog: HubCatalog | null, groupId: string, targetId: string) => {
   const group = catalogGroup(catalog, groupId);

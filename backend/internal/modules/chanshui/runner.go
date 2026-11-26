@@ -24,15 +24,115 @@ type RunnerConfig struct {
 
 // The one existing admission slot also owns an unconfirmed helper. Keeping the
 // process here retains its control connection without adding a recovery worker.
-type queryProcessSlot struct{ process *process }
+type queryProcessSlot struct {
+	process                       *process
+	owner                         Owner
+	step                          string
+	workDeadline, cleanupDeadline time.Time
+	reason                        string
+}
+type QueryState struct {
+	State, Reason            string
+	DeadlineMs, RetryAfterMs int64
+}
+
+func (q QueryState) problem() *Problem {
+	p := problem(429, "query", q.Reason)
+	p.QueryState = q.State
+	p.RecoveryDeadlineMs = q.DeadlineMs
+	p.RetryAfterMs = q.RetryAfterMs
+	return p
+}
 
 type Runner struct {
 	cfg       RunnerConfig
 	querySlot chan *queryProcessSlot
+	queryMu   sync.Mutex
+	queryRef  *queryProcessSlot
 }
 
 func NewRunner(cfg RunnerConfig) *Runner {
 	return &Runner{cfg: cfg, querySlot: make(chan *queryProcessSlot, 1)}
+}
+func queryStep(operation string) string {
+	switch operation {
+	case "create-report", "create-batch", "retry-report":
+		return "保存检测受理"
+	case "finish-interrupted", "cancel-queued", "interrupt-batch-unstarted", "recover":
+		return "核查并保存结束状态"
+	case "init":
+		return "初始化检测数据库"
+	case "models":
+		return "读取上游模型列表"
+	case "save-settings", "save-question", "delete-question", "judge-item":
+		return "保存检测设置或结果"
+	default:
+		return "读取已保存数据"
+	}
+}
+func (r *Runner) QueryStatus(owner Owner) QueryState {
+	r.queryMu.Lock()
+	defer r.queryMu.Unlock()
+	slot := r.queryRef
+	if slot == nil {
+		return QueryState{}
+	}
+	state := "busy"
+	if slot.reason != "" || !slot.cleanupDeadline.IsZero() && time.Now().After(slot.cleanupDeadline) {
+		state = "retained"
+	}
+	reason := "正在读取或保存其他检测状态，稍后自动核查；此时不会重发检测题目"
+	if state == "retained" {
+		reason = queryExitUnconfirmedMessage
+		if slot.owner == owner && slot.reason != "" {
+			reason = slot.reason
+		}
+	} else if slot.owner == owner {
+		reason = "正在处理检测状态（" + slot.step + "），稍后重新读取"
+	}
+	return QueryState{State: state, Reason: reason, DeadlineMs: unixMilli(slot.cleanupDeadline), RetryAfterMs: 1000}
+}
+func (s *Service) queryStatus(owner Owner) QueryState {
+	if r, ok := s.runner.(interface{ QueryStatus(Owner) QueryState }); ok {
+		return r.QueryStatus(owner)
+	}
+	return QueryState{}
+}
+func (s *Service) withQueryStatus(owner Owner, err error) error {
+	status := s.queryStatus(owner)
+	if status.State == "" {
+		return err
+	}
+	p := asProblem(err)
+	if p.QueryState == "" && p.Status != 429 && !(p.Status >= 500 && p.Step == "query-exit" && status.State == "retained") {
+		return err
+	}
+	p.QueryState = status.State
+	p.RecoveryDeadlineMs = status.DeadlineMs
+	s.mu.Lock()
+	if s.recoveryRunning {
+		p.RecoveryDeadlineMs = unixMilli(s.recoveryDeadline)
+	}
+	s.mu.Unlock()
+	p.RetryAfterMs = status.RetryAfterMs
+	if status.State == "retained" {
+		if p.Status != 429 {
+			p.Status = 503
+		}
+		if !strings.Contains(status.Reason, p.Message) {
+			p.Message = status.Reason + "；本次操作：" + p.Message
+		} else {
+			p.Message = status.Reason
+		}
+	}
+	return p
+}
+func deadlineCap(ctx context.Context, d time.Duration) time.Time {
+	limit := time.Now().Add(d)
+	if end, ok := ctx.Deadline(); ok && end.Before(limit) {
+		return end
+	}
+	return limit
 }
 func (r *Runner) prepareDataDir() error {
 	if !filepath.IsAbs(r.cfg.DataDir) || !within(r.cfg.ProjectDir, r.cfg.DataDir) {
@@ -88,7 +188,9 @@ func (r *Runner) Available(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	return m.release("")
+	releaseCtx, cancel := context.WithDeadline(context.Background(), deadlineCap(ctx, 3*time.Second))
+	defer cancel()
+	return m.releaseContext(releaseCtx, "")
 }
 func within(root, path string) bool {
 	rel, e := filepath.Rel(root, path)
@@ -106,6 +208,10 @@ type process struct {
 	exit                  ExitInfo
 	exitErr               error
 	release               sync.Once
+	cleanupMu             sync.Mutex
+	cleanupDeadline       time.Time
+	cleanupMaximum        time.Time
+	lateCleanup           func(time.Time) error
 }
 
 func (p *process) info() ExitInfo { p.mu.Lock(); defer p.mu.Unlock(); return p.exit }
@@ -129,48 +235,124 @@ func (p *process) setExit(info ExitInfo, err error) {
 	p.exitErr = err
 }
 func (p *process) stop(ctx context.Context) error {
+	control, cancel := context.WithTimeout(ctx, 3*time.Second)
+	defer cancel()
+	if p.monitorFinished() {
+		// A new, explicit Stop is the only control action that can supply a
+		// fresh release deadline once the original monitor returned unknown.
+		// It does not renew any report or query execution budget.
+		p.mu.Lock()
+		if !p.exit.Exited {
+			p.cleanupDeadline = deadlineCap(control, 3*time.Second)
+		}
+		p.mu.Unlock()
+	}
 	if p.info().Exited {
+		return p.finishLateStopCleanup(control)
+	}
+	normal, stop := context.WithDeadline(control, deadlineCap(control, time.Second))
+	defer stop()
+	err := p.manager.stop(normal, p.name)
+	if p.awaitExit(normal) {
+		return p.finishLateStopCleanup(control)
+	}
+	stop()
+	if control.Err() != nil {
+		return errors.Join(err, control.Err())
+	}
+	if killErr := p.manager.kill(control, p.name); killErr != nil {
+		return errors.Join(err, killErr)
+	}
+	// Kill acceptance is not an exit. If the original monitor is gone,
+	// use the remaining control window to obtain a real exit observation.
+	if p.monitorFinished() && p.awaitExit(control) {
+		return p.finishLateStopCleanup(control)
+	}
+	return nil
+}
+func (p *process) monitorFinished() bool {
+	select {
+	case <-p.done:
+		return true
+	default:
+		return false
+	}
+}
+func (p *process) finishLateStopCleanup(ctx context.Context) error {
+	if !p.monitorFinished() || !p.info().Exited {
 		return nil
 	}
-	return p.manager.stop(ctx, p.name)
+	if err := p.confirmedCleanup(nil)(deadlineCap(ctx, 3*time.Second)); err != nil {
+		return fmt.Errorf("检测程序已确认退出，但原进程管理资源清理未完成：%w", err)
+	}
+	return nil
 }
-func (p *process) stopAndWait() {
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	_ = p.manager.stop(ctx, p.name)
-	until := time.Now().Add(5 * time.Second)
-	for time.Now().Before(until) {
+func (p *process) awaitExit(ctx context.Context) bool {
+	for ctx.Err() == nil {
 		info, err := p.manager.inspect(ctx, p.name)
 		if err == nil && info.Exited {
 			p.setExit(info, nil)
-			return
+			return true
 		}
 		if namedBusError(err, "org.freedesktop.systemd1.NoSuchUnit") {
 			p.setExit(ExitInfo{Exited: true}, nil)
-			return
+			return true
 		}
-		time.Sleep(30 * time.Millisecond)
+		select {
+		case <-ctx.Done():
+		case <-time.After(30 * time.Millisecond):
+		}
 	}
-	killCtx, killCancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer killCancel()
+	return p.info().Exited
+}
+func (p *process) cleanupLimit() time.Time {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.cleanupDeadline.IsZero() {
+		p.cleanupDeadline = time.Now().Add(10 * time.Second)
+		if !p.cleanupMaximum.IsZero() && p.cleanupMaximum.Before(p.cleanupDeadline) {
+			p.cleanupDeadline = p.cleanupMaximum
+		}
+	}
+	return p.cleanupDeadline
+}
+func (p *process) stopAndWait() {
+	deadline := p.cleanupLimit()
+	lockUntil, cancel := context.WithDeadline(context.Background(), deadline)
+	defer cancel()
+	if lockContext(lockUntil, &p.cleanupMu) != nil {
+		return
+	}
+	defer p.cleanupMu.Unlock()
+	if p.info().Exited {
+		return
+	}
+	stopDeadline := deadline.Add(-5 * time.Second)
+	stopCtx, stop := context.WithDeadline(context.Background(), stopDeadline)
+	_ = p.manager.stop(stopCtx, p.name)
+	exited := p.awaitExit(stopCtx)
+	stop()
+	if exited {
+		return
+	}
+	killCtx, stopKill := context.WithDeadline(context.Background(), deadline.Add(-3*time.Second))
+	defer stopKill()
 	_ = p.manager.kill(killCtx, p.name)
-	until = time.Now().Add(2 * time.Second)
-	for time.Now().Before(until) {
-		info, err := p.manager.inspect(killCtx, p.name)
-		if err == nil && info.Exited {
-			p.setExit(info, nil)
-			return
-		}
-		if namedBusError(err, "org.freedesktop.systemd1.NoSuchUnit") {
-			p.setExit(ExitInfo{Exited: true}, nil)
-			return
-		}
-		time.Sleep(30 * time.Millisecond)
+	if p.awaitExit(killCtx) {
+		return
 	}
 	p.setExit(ExitInfo{}, fmt.Errorf("停止后仍无法确认整个检测进程组已退出，请核查systemd运行诊断"))
 }
 func (p *process) monitor(ctx context.Context) {
-	defer close(p.done)
+	defer func() {
+		close(p.done)
+		p.mu.Lock()
+		late := p.lateCleanup
+		p.mu.Unlock()
+		if late != nil && p.info().Exited {
+			_ = late(p.cleanupLimit())
+		}
+	}()
 	tick := time.NewTicker(75 * time.Millisecond)
 	defer tick.Stop()
 	for {
@@ -194,21 +376,24 @@ func (p *process) monitor(ctx context.Context) {
 	}
 }
 func (p *process) close() error {
-	p.release.Do(func() {
-		if p.monitored {
-			select {
-			case <-p.done:
-			case <-time.After(2 * time.Second):
-				p.stopAndWait()
-				<-p.done
-			}
-		} else if !p.info().Exited {
+	return p.closeUntil(p.cleanupLimit())
+}
+func (p *process) closeUntil(deadline time.Time) error {
+	if !p.info().Exited {
+		if !p.monitored {
 			p.stopAndWait()
 		}
+		if !p.info().Exited {
+			return errors.New(queryExitUnconfirmedMessage)
+		}
+	}
+	p.release.Do(func() {
 		p.input.Close()
 		p.output.Close()
 		p.stderr.Close()
-		if err := p.manager.release(p.name); err != nil {
+		ctx, cancel := context.WithDeadline(context.Background(), deadlineCapTime(deadline, 3*time.Second))
+		defer cancel()
+		if err := p.manager.releaseContext(ctx, p.name); err != nil {
 			p.mu.Lock()
 			p.exitErr = err
 			p.mu.Unlock()
@@ -217,6 +402,13 @@ func (p *process) close() error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	return p.exitErr
+}
+func deadlineCapTime(limit time.Time, d time.Duration) time.Time {
+	now := time.Now().Add(d)
+	if !limit.IsZero() && limit.Before(now) {
+		return limit
+	}
+	return now
 }
 func (p *process) interruptControlIO(ctx context.Context) func() bool {
 	return context.AfterFunc(ctx, func() {
@@ -246,21 +438,45 @@ func (p *process) failLaunch(issue error) (*process, error) {
 
 // An unknown exit must retain its admission slot; a closed Done channel alone
 // is not evidence that the systemd process group has exited.
-const queryExitUnconfirmedMessage = "查询程序退出尚未确认，后续查询已暂停；请检查检测运行诊断，确认原查询退出并重启服务后再读取；已保存报告保留，不会自动重跑模型"
+const queryExitUnconfirmedMessage = "查询程序退出尚未确认，后续查询已暂停；请检查本实例systemd与原查询进程后按审核重新启动本调度站后端；已保存报告保留，不会自动重跑模型"
 
+// The original reader, original monitor and a later explicitly accepted Stop
+// all share the same cleanup. Files/manager close and any query slot release
+// each happen only once, after a genuine exit observation.
+func (p *process) confirmedCleanup(release func()) func(time.Time) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.lateCleanup == nil {
+		var releaseOnce sync.Once
+		p.lateCleanup = func(deadline time.Time) error {
+			err := p.closeUntil(deadline)
+			if release != nil && p.info().Exited {
+				releaseOnce.Do(release)
+			}
+			return err
+		}
+	}
+	return p.lateCleanup
+}
 func (p *process) closeAfterConfirmedExit(release func()) error {
-	<-p.done
+	deadline := p.cleanupLimit()
+	cleanup := p.confirmedCleanup(release)
+	ctx, cancel := context.WithDeadline(context.Background(), deadline)
+	defer cancel()
+	if !p.monitorFinished() {
+		select {
+		case <-p.done:
+		case <-ctx.Done():
+			return errors.New(queryExitUnconfirmedMessage)
+		}
+	}
 	if !p.info().Exited {
 		p.mu.Lock()
-		exitErr := p.exitErr
+		err := p.exitErr
 		p.mu.Unlock()
-		return errors.Join(errors.New(queryExitUnconfirmedMessage), exitErr)
+		return errors.Join(errors.New(queryExitUnconfirmedMessage), err)
 	}
-	err := p.close()
-	if release != nil {
-		release()
-	}
-	return err
+	return cleanup(deadline)
 }
 
 func readLine(reader *bufio.Reader) ([]byte, error) {
@@ -283,18 +499,18 @@ func (r *Runner) launch(ctx context.Context, role string, env Envelope, limit ui
 	}
 	var nonce [16]byte
 	if _, err = rand.Read(nonce[:]); err != nil {
-		return nil, errors.Join(err, m.release(""))
+		return nil, errors.Join(err, m.releaseContext(ctx, ""))
 	}
 	name := "transithub-chanshui-" + role + "-" + hex.EncodeToString(nonce[:]) + ".service"
 	inR, inW, err := os.Pipe()
 	if err != nil {
-		return nil, errors.Join(err, m.release(""))
+		return nil, errors.Join(err, m.releaseContext(ctx, ""))
 	}
 	outR, outW, err := os.Pipe()
 	if err != nil {
 		inR.Close()
 		inW.Close()
-		return nil, errors.Join(err, m.release(""))
+		return nil, errors.Join(err, m.releaseContext(ctx, ""))
 	}
 	errR, errW, err := os.Pipe()
 	if err != nil {
@@ -302,9 +518,9 @@ func (r *Runner) launch(ctx context.Context, role string, env Envelope, limit ui
 		inW.Close()
 		outR.Close()
 		outW.Close()
-		return nil, errors.Join(err, m.release(""))
+		return nil, errors.Join(err, m.releaseContext(ctx, ""))
 	}
-	p := &process{manager: m, name: name, input: inW, output: outR, stderr: errR, reader: bufio.NewReaderSize(outR, 4096), done: make(chan struct{})}
+	p := &process{manager: m, name: name, input: inW, output: outR, stderr: errR, reader: bufio.NewReaderSize(outR, 4096), done: make(chan struct{}), cleanupMaximum: deadlineCap(ctx, 30*time.Second).Add(10 * time.Second)}
 	stopControlIO := p.interruptControlIO(ctx)
 	defer stopControlIO()
 	err = m.start(ctx, name, role, r.cfg, limit, seconds, inR, outW, errW)
@@ -337,7 +553,7 @@ func (r *Runner) launch(ctx context.Context, role string, env Envelope, limit ui
 		}
 		return p.failLaunch(problem(503, "handshake", "无法交付检测启动参数，尚未发送模型请求；请检查程序版本后重试"))
 	}
-	_ = p.output.SetReadDeadline(time.Now().Add(10 * time.Second))
+	_ = p.output.SetReadDeadline(deadlineCap(ctx, 10*time.Second))
 	line, err := readLine(p.reader)
 	if err != nil || ctx.Err() != nil {
 		if ctx.Err() != nil {
@@ -401,52 +617,120 @@ func (r *Runner) Query(ctx context.Context, env Envelope, cred *Credential, inte
 // The launch boundary is passed explicitly so the full query protocol can be
 // tested with real pipes and a deterministic process-exit result.
 func (r *Runner) query(ctx context.Context, env Envelope, cred *Credential, internal bool, launch func(context.Context, string, Envelope, uint64, int) (*process, error)) (*QueryResponse, error) {
-	slot := &queryProcessSlot{}
-	if internal {
-		wait, cancel := context.WithTimeout(ctx, 25*time.Second)
-		defer cancel()
-		select {
-		case r.querySlot <- slot:
-		case <-wait.Done():
-			return nil, problem(503, "recovery", "保存检测结束状态时等待其他查询超时，请稍后点击停止检测以重试保存；不会重新调用模型")
+	if status := r.QueryStatus(env.Owner); status.State == "retained" {
+		return nil, status.problem()
+	}
+	slot := &queryProcessSlot{owner: env.Owner, step: queryStep(env.Operation)}
+	waitDuration := 25 * time.Second
+	if !internal {
+		waitDuration = 0
+	}
+	wait, cancelWait := context.WithTimeout(ctx, waitDuration)
+	defer cancelWait()
+	var queryCtx context.Context
+	var cancel context.CancelFunc
+	var workEnd time.Time
+	for {
+		if ctx.Err() != nil {
+			return nil, problem(503, "query", "读取时间已到，本次查询尚未开始，请重新核查")
 		}
-	} else {
+		r.queryMu.Lock()
+		acquired := false
 		select {
 		case r.querySlot <- slot:
+			queryCtx, cancel = context.WithTimeout(ctx, 15*time.Second)
+			workEnd, _ = queryCtx.Deadline()
+			slot.workDeadline = workEnd
+			slot.cleanupDeadline = workEnd.Add(10 * time.Second)
+			r.queryRef = slot
+			acquired = true
 		default:
-			return nil, problem(429, "query", "另一个检测查询正在处理，请稍后重试；尚未重复执行本次操作")
+		}
+		r.queryMu.Unlock()
+		if acquired {
+			break
+		}
+		if state := r.QueryStatus(env.Owner); state.State == "retained" || !internal {
+			if state.State == "" {
+				state = QueryState{State: "busy", Reason: "另一个检测查询正在处理，请稍后重试", RetryAfterMs: 1000}
+			}
+			return nil, state.problem()
+		}
+		select {
+		case <-wait.Done():
+			state := r.QueryStatus(env.Owner)
+			if state.State != "" {
+				return nil, state.problem()
+			}
+			return nil, problem(503, "query", "等待检测查询位置超时，请核查运行状态；不会重新调用模型")
+		case <-time.After(10 * time.Millisecond):
 		}
 	}
-	release := func() { <-r.querySlot }
-	queryCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	var released sync.Once
+	release := func() {
+		released.Do(func() {
+			r.queryMu.Lock()
+			if r.queryRef == slot {
+				r.queryRef = nil
+			}
+			<-r.querySlot
+			r.queryMu.Unlock()
+		})
+	}
+	retain := func(err error) {
+		r.queryMu.Lock()
+		if r.queryRef == slot {
+			slot.reason = queryExitUnconfirmedMessage
+			if err != nil {
+				slot.reason += "：" + err.Error()
+			}
+		}
+		r.queryMu.Unlock()
+	}
+	annotateRetained := func(issue *Problem) {
+		state := r.QueryStatus(env.Owner)
+		issue.QueryState = state.State
+		issue.RecoveryDeadlineMs = state.DeadlineMs
+		issue.RetryAfterMs = state.RetryAfterMs
+		if issue.Status < 500 {
+			issue.Status = 503
+		}
+	}
 	p, err := launch(queryCtx, "query", env, 64*1024*1024, 15)
+	r.queryMu.Lock()
 	slot.process = p
+	r.queryMu.Unlock()
 	if err != nil {
 		cancel()
 		if p == nil {
 			release()
 		} else {
 			if !p.monitored {
-				reclaim, finish := context.WithTimeout(context.Background(), 25*time.Second)
-				p.monitored = true
-				go func() { p.monitor(reclaim); finish() }()
-			}
-			select {
-			case <-p.done:
-				if cleanupErr := p.closeAfterConfirmedExit(release); cleanupErr != nil {
+				if p.info().Exited {
+					_ = p.close()
+					release()
+				} else {
+					retain(err)
 					issue := asProblem(err)
-					issue.Message += "；" + cleanupErr.Error()
+					issue.Message += "；" + queryExitUnconfirmedMessage
+					annotateRetained(issue)
 					err = issue
 				}
-			default:
+			} else if cleanupErr := p.closeAfterConfirmedExit(release); cleanupErr != nil {
 				issue := asProblem(err)
-				issue.Message += "；" + queryExitUnconfirmedMessage
+				issue.Message += "；" + cleanupErr.Error()
 				err = issue
-				go p.closeAfterConfirmedExit(release)
+				if !p.info().Exited {
+					retain(cleanupErr)
+					annotateRetained(issue)
+				}
 			}
 		}
 		return nil, err
 	}
+	p.mu.Lock()
+	p.cleanupMaximum = slot.cleanupDeadline
+	p.mu.Unlock()
 	if !p.monitored {
 		p.monitored = true
 		go p.monitor(queryCtx)
@@ -455,6 +739,10 @@ func (r *Runner) query(ctx context.Context, env Envelope, cred *Credential, inte
 		cancel()
 		if cleanupErr := p.closeAfterConfirmedExit(release); cleanupErr != nil {
 			issue.Message += "；" + cleanupErr.Error()
+			if !p.info().Exited {
+				retain(cleanupErr)
+				annotateRetained(issue)
+			}
 		}
 		return nil, issue
 	}
@@ -465,10 +753,15 @@ func (r *Runner) query(ctx context.Context, env Envelope, cred *Credential, inte
 		}
 		return failQuery(e)
 	}
-	_ = p.output.SetReadDeadline(time.Now().Add(15 * time.Second))
+	_ = p.output.SetReadDeadline(workEnd)
 	line, err := readLine(p.reader)
 	if err != nil {
-		return failQuery(problem(503, "query", "读取检测数据失败；请检查磁盘权限、可用空间及检测运行诊断后重试"))
+		if queryCtx.Err() != nil || errors.Is(err, os.ErrDeadlineExceeded) || !time.Now().Before(workEnd) {
+			issue := problem(503, "query", "辅助查询的15秒执行期限或本次操作剩余时间已到，正在确认程序退出；若本次是创建或补测，请先按原编号查询，不要重复提交")
+			issue.OperationResult = "unknown"
+			return failQuery(issue)
+		}
+		return failQuery(problem(503, "query", "读取检测数据的控制信息未完成："+err.Error()+"；请核查检测程序运行诊断后重试"))
 	}
 	var header wireHeader
 	if json.Unmarshal(line, &header) != nil || header.V != 1 || header.Length < 0 || header.Length > 16*1024*1024 {
@@ -492,7 +785,7 @@ func (r *Runner) query(ctx context.Context, env Envelope, cred *Credential, inte
 	if header.ContentType == "" {
 		header.ContentType = "application/json"
 	}
-	return &QueryResponse{header.Status, header.ContentType, header.Length, &queryBody{reader: p.reader, left: header.Length, p: p, cancel: cancel, release: release}}, nil
+	return &QueryResponse{header.Status, header.ContentType, header.Length, &queryBody{reader: p.reader, left: header.Length, p: p, cancel: cancel, release: release, retain: retain}}, nil
 }
 
 type queryBody struct {
@@ -501,6 +794,7 @@ type queryBody struct {
 	p       *process
 	cancel  context.CancelFunc
 	release func()
+	retain  func(error)
 	once    sync.Once
 	err     error
 }
@@ -528,15 +822,20 @@ func (b *queryBody) Close() error {
 		case <-b.p.done:
 		case <-time.After(2 * time.Second):
 			b.cancel()
-			<-b.p.done
 		}
 		b.err = b.p.closeAfterConfirmedExit(b.release)
+		if b.err != nil && !b.p.info().Exited && b.retain != nil {
+			b.retain(b.err)
+		}
 		b.cancel()
 	})
 	return b.err
 }
 
 func (r *Runner) Start(ctx context.Context, env Envelope, cred Credential, memoryMiB, totalSeconds int) (*Job, error) {
+	if status := r.QueryStatus(env.Owner); status.State == "retained" {
+		return nil, status.problem()
+	}
 	if memoryMiB < 128 || memoryMiB > 384 || totalSeconds < 60 || totalSeconds > maxTaskSeconds {
 		return nil, problem(422, "settings", "任务内存须为128～384MiB，总时限须为60～9223371976秒；请修改运行设置后重试")
 	}
@@ -547,9 +846,13 @@ func (r *Runner) Start(ctx context.Context, env Envelope, cred Credential, memor
 		return nil, err
 	}
 	runCtx, runCancel := context.WithTimeout(context.Background(), time.Duration(totalSeconds+10)*time.Second)
+	runEnd, _ := runCtx.Deadline()
+	p.mu.Lock()
+	p.cleanupMaximum = runEnd.Add(10 * time.Second)
+	p.mu.Unlock()
 	p.monitored = true
 	go func() { p.monitor(runCtx); runCancel() }()
-	job := &Job{ID: p.name, Done: p.done, stop: p.stop, info: p.info}
+	job := &Job{ID: p.name, Done: p.done, stop: p.stop, info: p.info, ExitConfirmDeadline: runEnd.Add(10 * time.Second)}
 	if err != nil {
 		go p.closeAfterConfirmedExit(nil)
 		return job, err
@@ -579,7 +882,7 @@ func (r *Runner) Start(ctx context.Context, env Envelope, cred Credential, memor
 		}
 		return job, e
 	}
-	_ = p.output.SetReadDeadline(time.Now().Add(10 * time.Second))
+	_ = p.output.SetReadDeadline(deadlineCap(startup, 10*time.Second))
 	line, err := readLine(p.reader)
 	stopControlIO()
 	var event struct {
@@ -599,7 +902,7 @@ func (r *Runner) Start(ctx context.Context, env Envelope, cred Credential, memor
 	}
 	_ = p.output.SetReadDeadline(time.Time{})
 	go func() {
-		defer p.close()
+		defer p.closeAfterConfirmedExit(nil)
 		total := 0
 		for {
 			line, err := readLine(p.reader)
@@ -636,7 +939,11 @@ func (r *Runner) Recover(ctx context.Context) (err error) {
 	if err != nil {
 		return err
 	}
-	defer func() { err = errors.Join(err, m.release("")) }()
+	defer func() {
+		release, cancel := context.WithDeadline(context.Background(), deadlineCap(ctx, 3*time.Second))
+		defer cancel()
+		err = errors.Join(err, m.releaseContext(release, ""))
+	}()
 	var units []listedUnit
 	if err = m.call(ctx, "ListUnitsByPatterns", []string{}, []string{"transithub-chanshui-run-*.service", "transithub-chanshui-query-*.service"}).Store(&units); err != nil {
 		return err

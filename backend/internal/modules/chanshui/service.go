@@ -3,11 +3,13 @@ package chanshui
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"os"
 	"path/filepath"
 	"regexp"
 	"sync"
+	"time"
 	"transithub/backend/internal/config"
 	"transithub/backend/internal/modules/connection_health"
 )
@@ -20,33 +22,41 @@ type TargetReader interface {
 	ResolveAuditContext(context.Context, string, string, string, bool) (connection_health.AuditContext, error)
 }
 type activeTask struct {
-	Owner                   Owner
-	ReportID, AccountName   string
-	Job                     *Job
-	Diagnostic              string
-	OperationResult         string
-	Input                   StartInput
-	Preparing               bool
-	CancelRequested         bool
-	CancelPrepare           context.CancelFunc
-	PreparationDone         chan struct{}
-	prepareContext          context.Context
-	memoryMiB, totalSeconds int
+	Owner                          Owner
+	ReportID, AccountName, BatchID string
+	Job                            *Job
+	Diagnostic                     string
+	RecoveryReason                 string
+	OperationResult                string
+	Input                          StartInput
+	Preparing                      bool
+	CancelRequested                bool
+	StopConfirmDeadlineMs          int64
+	StopCallPending                bool
+	RecoveryAttempted              bool
+	recoveryDeadlineMs             int64
+	CancelPrepare                  context.CancelFunc
+	PreparationDone                chan struct{}
+	prepareContext                 context.Context
+	memoryMiB, totalSeconds        int
 }
 type Service struct {
-	cfg         config.Config
-	workspace   WorkspaceResolver
-	targets     TargetReader
-	runner      Executor
-	webDir      string
-	initMu      sync.Mutex
-	initialized bool
-	admission   sync.Mutex
-	mu          sync.Mutex
-	active      *activeTask
-	waiting     []*waitingTask
-	blocked     map[reportKey]*blockedReport
-	closing     bool
+	cfg              config.Config
+	workspace        WorkspaceResolver
+	targets          TargetReader
+	runner           Executor
+	webDir           string
+	initMu           sync.Mutex
+	initialized      bool
+	admission        sync.Mutex
+	mu               sync.Mutex
+	active           *activeTask
+	waiting          []*waitingTask
+	blocked          map[reportKey]*blockedReport
+	closing          bool
+	recoveryRunning  bool
+	recoveryDeadline time.Time
+	recoveryCancel   context.CancelFunc
 }
 
 func projectDir() string {
@@ -89,7 +99,12 @@ func (s *Service) ensureInitialized(ctx context.Context) error {
 	if !s.cfg.ChanshuiEnabled {
 		return problem(503, "configuration", "当前实例仅提供接口，不能运行检测；请打开正常调度站实例。原调度功能不受影响")
 	}
-	s.initMu.Lock()
+	if status := s.queryStatus(Owner{}); status.State == "retained" {
+		return status.problem()
+	}
+	if err := lockContext(ctx, &s.initMu); err != nil {
+		return problem(503, "initialization", "检测初始化未完成，无法确认旧程序状态，请检查systemd后按审核重启本调度站后端")
+	}
 	defer s.initMu.Unlock()
 	if s.initialized {
 		return nil
@@ -135,7 +150,7 @@ func (s *Service) owner(ctx context.Context, user string) (Owner, error) {
 func (s *Service) queryJSON(ctx context.Context, op string, owner Owner, args any, cred *Credential, internal bool) (json.RawMessage, error) {
 	response, err := s.runner.Query(ctx, Envelope{V: 1, Operation: op, Owner: owner, Args: args}, cred, internal)
 	if err != nil {
-		return nil, err
+		return nil, s.withQueryStatus(owner, err)
 	}
 	defer response.Body.Close()
 	if response.Length > 64*1024 {
@@ -143,10 +158,16 @@ func (s *Service) queryJSON(ctx context.Context, op string, owner Owner, args an
 	}
 	data, err := io.ReadAll(io.LimitReader(response.Body, 64*1024+1))
 	if err != nil || int64(len(data)) != response.Length {
-		return nil, problem(503, "query", "检测摘要读取中断，请重新读取；本操作不会重新调用模型")
+		message := "检测摘要读取中断，请重新读取；本操作不会重新调用模型"
+		if errors.Is(err, os.ErrDeadlineExceeded) || ctx.Err() != nil {
+			message = "辅助查询的执行期限或本次操作剩余时间已到，正在确认程序退出；若本次是创建或补测，请先按原编号查询，不要重复提交"
+		} else if err != nil {
+			message += "：" + err.Error()
+		}
+		return nil, s.withQueryStatus(owner, problem(503, "query", message))
 	}
 	if err := response.Body.Close(); err != nil {
-		return nil, problem(503, "query-exit", "检测数据已返回，但辅助程序清理未完成；请核查运行状态后重试："+err.Error())
+		return nil, s.withQueryStatus(owner, problem(503, "query-exit", "检测数据已返回，但辅助程序清理未完成；请核查运行状态后重试："+err.Error()))
 	}
 	return json.RawMessage(data), nil
 }
@@ -202,7 +223,11 @@ func (s *Service) recoverExited(ctx context.Context, active *activeTask) error {
 		return nil
 	}
 	job, diagnostic, operationResult := active.Job, active.Diagnostic, active.OperationResult
+	if diagnostic == active.RecoveryReason {
+		diagnostic = ""
+	}
 	preparing, userCancelled := active.Preparing, active.CancelRequested
+	mayFinalize := s.mayFinalizeBatchLocked(active.Owner, active.BatchID, active, nil)
 	s.mu.Unlock()
 	if preparing {
 		return problem(503, "prepare", "正在结束检测准备，请稍后核查；已保存回答仍可查看")
@@ -228,9 +253,17 @@ func (s *Service) recoverExited(ctx context.Context, active *activeTask) error {
 	var err error
 	var saved json.RawMessage
 	if userCancelled && operationResult == "not_started" {
-		saved, err = s.queryJSON(ctx, "cancel-queued", active.Owner, map[string]any{"reportId": active.ReportID}, nil, true)
+		args := map[string]any{"reportId": active.ReportID}
+		if active.BatchID != "" {
+			args["mayFinalizeBatch"] = mayFinalize
+		}
+		saved, err = s.queryJSON(ctx, "cancel-queued", active.Owner, args, nil, true)
 	} else {
-		saved, err = s.queryJSON(ctx, "finish-interrupted", active.Owner, map[string]any{"reportId": active.ReportID, "error": map[string]any{"message": message, "step": "exit", "operationResult": operationResult}}, nil, true)
+		args := map[string]any{"reportId": active.ReportID, "error": map[string]any{"message": message, "step": "exit", "operationResult": operationResult}}
+		if active.BatchID != "" {
+			args["mayFinalizeBatch"] = mayFinalize
+		}
+		saved, err = s.queryJSON(ctx, "finish-interrupted", active.Owner, args, nil, true)
 	}
 	if err == nil {
 		err = confirmTerminal(saved)
@@ -240,8 +273,11 @@ func (s *Service) recoverExited(ctx context.Context, active *activeTask) error {
 	}
 	if err != nil {
 		s.mu.Lock()
-		active.Diagnostic = "检测程序已退出，但报告状态尚未保存：" + asProblem(err).Message + "；请处理后点击停止检测以重试保存，不会再次调用模型"
-		message = active.Diagnostic
+		message = "检测程序已退出，但报告状态尚未保存：" + asProblem(err).Message + "；请处理后点击核查并重试保存，不会再次调用模型"
+		if active.Diagnostic == "" || active.Diagnostic == active.RecoveryReason {
+			active.Diagnostic = message
+		}
+		active.RecoveryReason = message
 		s.mu.Unlock()
 		return problem(503, "recovery", message)
 	}
@@ -266,38 +302,17 @@ func (s *Service) runtime(ctx context.Context, owner Owner) map[string]any {
 		result["reason"] = "当前实例仅提供接口，不能运行检测；请打开正常调度站实例，原调度功能不受影响"
 		return result
 	}
-	if err := s.ensureInitialized(ctx); err != nil {
-		result["reason"] = asProblem(err).Message
-		return result
-	}
-	result["available"] = true
+	status := s.queryStatus(owner)
 	s.mu.Lock()
-	defer s.mu.Unlock()
-	result["queuedCount"] = len(s.waiting)
-	if len(s.blocked) > 0 {
-		result["queueBlocked"] = true
-		result["reason"] = "有报告状态尚未保存，等待队列已暂停；请在原报告点击停止检测以重试保存"
-		for _, entry := range s.blocked {
-			if entry.Owner == owner {
-				result["reason"] = entry.Message
-				break
-			}
+	hasRuntime := s.active != nil || s.recoveryRunning || len(s.blocked) != 0
+	s.mu.Unlock()
+	if !hasRuntime && status.State == "" {
+		work, cancel := context.WithTimeout(ctx, 30*time.Second)
+		defer cancel()
+		if err := s.ensureInitialized(work); err != nil {
+			result["reason"] = asProblem(err).Message
+			return result
 		}
 	}
-	if active := s.active; active != nil {
-		if active.Owner == owner {
-			info := ExitInfo{}
-			if active.Job != nil {
-				info = active.Job.Info()
-			}
-			status := "running"
-			if active.Preparing {
-				status = "queued"
-			}
-			result["active"] = map[string]any{"reportId": active.ReportID, "accountName": active.AccountName, "model": active.Input.Model, "status": status, "processExited": info.Exited, "diagnostic": active.Diagnostic, "stopRequested": active.CancelRequested, "memoryPeakBytes": info.MemoryPeak, "taskMemoryMaxBytes": info.TaskMemoryMaxBytes, "sliceMemoryMaxBytes": info.SliceMemoryMaxBytes, "swapMaxBytes": info.SwapMaxBytes}
-		} else {
-			result["reason"] = "另一个检测正在执行，新报告可以加入等待队列"
-		}
-	}
-	return result
+	return s.captureRuntime(owner).runtime(owner)
 }

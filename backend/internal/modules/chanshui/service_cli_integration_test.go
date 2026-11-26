@@ -2,6 +2,7 @@ package chanshui
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -65,8 +66,40 @@ func TestChanshuiActualServiceSequentialRunsAndCredentialEnums(t *testing.T) {
 					fmt.Fprint(w, `{"data":[{"id":"fixture-model"}]}`)
 					return
 				}
+				var input struct {
+					Stream bool `json:"stream"`
+				}
+				if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
+					w.WriteHeader(400)
+					return
+				}
 				paid.Add(1)
-				if scheme == "chat" {
+				if input.Stream {
+					w.Header().Set("Content-Type", "text/event-stream")
+					if scheme == "chat" {
+						fmt.Fprint(w, `data: {"choices":[{"delta":{"content":"最终答案: 开车去"},"finish_reason":null}]}
+
+data: {"choices":[{"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":10,"completion_tokens":5}}
+
+data: [DONE]
+
+`)
+					} else {
+						fmt.Fprint(w, `data: {"type":"message_start","message":{"content":[],"usage":{"input_tokens":10}}}
+
+data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}
+
+data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"最终答案: 开车去"}}
+
+data: {"type":"content_block_stop","index":0}
+
+data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":5}}
+
+data: {"type":"message_stop"}
+
+`)
+					}
+				} else if scheme == "chat" {
 					fmt.Fprint(w, `{"choices":[{"message":{"content":"最终答案: 开车去"},"finish_reason":"stop"}]}`)
 				} else {
 					fmt.Fprint(w, `{"content":[{"type":"text","text":"最终答案: 开车去"}],"stop_reason":"end_turn"}`)
@@ -94,6 +127,21 @@ func TestChanshuiActualServiceSequentialRunsAndCredentialEnums(t *testing.T) {
 			ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 			defer cancel()
 			owner := Owner{"service-cli-fixture", "workspace-a"}
+			// This fixture checks the configured protocol's exact credentials.
+			// The default auto mode deliberately sends compatibility headers
+			// for model discovery, so it is not the explicit Messages case.
+			raw, err := s.queryJSON(ctx, "read-settings", owner, map[string]any{}, nil, false)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var settings map[string]any
+			if err = json.Unmarshal(raw, &settings); err != nil {
+				t.Fatal(err)
+			}
+			settings["protocol"] = protocol
+			if _, err = s.queryJSON(ctx, "save-settings", owner, settings, nil, false); err != nil {
+				t.Fatal(err)
+			}
 			cred := credential(audit)
 			models, err := s.queryJSON(ctx, "models", owner, map[string]any{}, &cred, false)
 			if err != nil || !strings.Contains(string(models), "fixture-model") || wrongHeaders.Load() != 0 || modelReads.Load() != 1 || paid.Load() != 0 {

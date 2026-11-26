@@ -134,6 +134,69 @@ describe('唯一检测弹窗', () => {
       expect(state.request.mock.calls.some(([op]) => op === 'cancel')).toBe(true)
     } finally { release({}); await flushPromises() }
   })
+  it('批次提交必须核对全部账号及当前同步确认，不能绕过首次发送保护', async () => {
+    const groups = [{ id: 'gpt', name: 'GPT', accounts: [
+      { id: 'a', targetId: 'sub2api:workspace-a:a', name: '甲', testConfiguration: { protocol: 'chat_completions' } },
+      { id: 'b', targetId: 'sub2api:workspace-a:b', name: '乙', testConfiguration: { protocol: 'chat_completions' } },
+    ] }] as AdminGroupHealth[]
+    publishChanshuiCatalog('workspace-a', groups, chanshuiCatalogSession())
+    await launch()
+    const frame = portal().get('iframe').element as HTMLIFrameElement
+    const { delivered } = captureClonedPosts(frame)
+    message(frame, { kind: 'chanshui.READY', v: 1 }); await flushPromises()
+    const generation = delivered[0].generation
+    const req = { kind: 'chanshui.request', v: 1, generation, op: 'start-batch', params: {
+      batchId: 'b'.repeat(32), tasks: [{ targetId: 'sub2api:workspace-a:a', groupId: 'gpt' }, { targetId: 'sub2api:workspace-a:b', groupId: 'gpt' }]
+    } }
+    message(frame, { ...req, id: 'no-approval' }); await flushPromises()
+    expect(state.request.mock.calls.filter(([op]) => op === 'start-batch')).toHaveLength(0)
+    let verified: unknown
+    frame.contentWindow!.addEventListener('chanshui.before-start', event => { verified = (event as CustomEvent).detail.protocols; event.preventDefault() })
+    message(frame, { ...req, id: 'approved-batch' }); await flushPromises()
+    expect(verified).toEqual([{ targetId: 'sub2api:workspace-a:a', groupId: 'gpt', protocol: 'chat' }, { targetId: 'sub2api:workspace-a:b', groupId: 'gpt', protocol: 'chat' }])
+    expect(state.request.mock.calls.filter(([op]) => op === 'start-batch')).toHaveLength(1)
+    publishChanshuiCatalog('workspace-a', [{ ...groups[0], accounts: groups[0].accounts.slice(0, 1) }], chanshuiCatalogSession())
+    message(frame, { ...req, id: 'removed-member' }); await flushPromises()
+    expect(state.request.mock.calls.filter(([op]) => op === 'start-batch')).toHaveLength(1)
+    expect(delivered.find(m => m.id === 'removed-member')).toMatchObject({ ok: false, error: { operationResult: 'not_started' } })
+  })
+  it('45秒取消实际fetch与排队请求，迟到结果不复活已结束请求', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+    await launch()
+    const frame = portal().get('iframe').element as HTMLIFrameElement
+    const { delivered } = captureClonedPosts(frame)
+    message(frame, { kind: 'chanshui.READY', v: 1 }); await flushPromises()
+    const generation = delivered[0].generation
+    let signal: AbortSignal | undefined, release!: (v: unknown) => void
+    state.request.mockImplementationOnce((_op, _p, _w, s) => { signal = s; return new Promise(r => { release = r }) })
+    message(frame, { kind: 'chanshui.request', v: 1, generation, id: 'hung', op: 'report', params: {} })
+    message(frame, { kind: 'chanshui.request', v: 1, generation, id: 'queued', op: 'report', params: {} })
+    await flushPromises()
+    await vi.advanceTimersByTimeAsync(45000)
+    expect(signal?.aborted).toBe(true)
+    expect(delivered.find(m => m.id === 'hung')).toMatchObject({ ok: false })
+    expect(delivered.find(m => m.id === 'queued')).toMatchObject({ ok: false })
+    release({}); await flushPromises()
+    expect(state.request.mock.calls.filter(([op]) => op === 'report')).toHaveLength(1)
+    expect(delivered.filter(m => m.id === 'hung')).toHaveLength(1)
+  })
+  it('优先状态读与停止请求各自独占位置，普通读取满时也可核查', async () => {
+    await launch()
+    const frame = portal().get('iframe').element as HTMLIFrameElement
+    const { delivered } = captureClonedPosts(frame)
+    message(frame, { kind: 'chanshui.READY', v: 1 }); await flushPromises()
+    const generation = delivered[0].generation
+    const releases: Array<(v: unknown) => void> = []
+    state.request.mockImplementation(() => new Promise(r => { releases.push(r) }))
+    for (let i = 0; i < 12; i++) message(frame, { kind: 'chanshui.request', v: 1, generation, id: 'ordinary-'+i, op: 'report', params: {} })
+    message(frame, { kind: 'chanshui.request', v: 1, generation, id: 'state', op: 'runtime', afterStop: true, params: {} })
+    message(frame, { kind: 'chanshui.request', v: 1, generation, id: 'cancel', op: 'cancel', params: {} })
+    message(frame, { kind: 'chanshui.request', v: 1, generation, id: 'state2', op: 'batch', afterStop: true, params: {} })
+    await flushPromises()
+    expect(state.request.mock.calls.map(([op])=>op).sort()).toEqual(['cancel','report','runtime'])
+    expect(delivered.find(m=>m.id==='state2')).toMatchObject({ ok:false,error:{status:429} })
+    for(const release of releases) release({})
+  })
   it('有工作区时入口默认可见，运行状态接口失败不隐藏入口，也不预读接口', async () => {
     const launcher = useChanshuiLauncher()
     launcher.clear()

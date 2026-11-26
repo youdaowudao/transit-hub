@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"time"
 )
 
 const MemoryCeiling uint64 = 500000000
@@ -32,14 +33,17 @@ type Envelope struct {
 	Deployment Deployment `json:"deployment"`
 }
 type Problem struct {
-	Message         string `json:"message"`
-	Step            string `json:"step"`
-	OperationResult string `json:"operationResult"`
-	ReportID        string `json:"reportId,omitempty"`
-	Detail          string `json:"detail,omitempty"`
-	Retryable       bool   `json:"retryable"`
-	CurrentRevision *int   `json:"currentRevision,omitempty"`
-	Status          int    `json:"-"`
+	Message            string `json:"message"`
+	Step               string `json:"step"`
+	OperationResult    string `json:"operationResult"`
+	ReportID           string `json:"reportId,omitempty"`
+	Detail             string `json:"detail,omitempty"`
+	Retryable          bool   `json:"retryable"`
+	CurrentRevision    *int   `json:"currentRevision,omitempty"`
+	Status             int    `json:"-"`
+	QueryState         string `json:"queryState,omitempty"`
+	RetryAfterMs       int64  `json:"retryAfterMs,omitempty"`
+	RecoveryDeadlineMs int64  `json:"recoveryDeadlineMs,omitempty"`
 }
 
 func (e *Problem) Error() string { return e.Message }
@@ -69,10 +73,11 @@ type ExitInfo struct {
 	SwapMaxBytes        uint64 `json:"swapMaxBytes"`
 }
 type Job struct {
-	ID   string
-	Done <-chan struct{}
-	stop func(context.Context) error
-	info func() ExitInfo
+	ID                  string
+	ExitConfirmDeadline time.Time
+	Done                <-chan struct{}
+	stop                func(context.Context) error
+	info                func() ExitInfo
 }
 
 func (j *Job) Stop(ctx context.Context) error { return j.stop(ctx) }

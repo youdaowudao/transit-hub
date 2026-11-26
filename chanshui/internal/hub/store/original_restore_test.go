@@ -26,6 +26,7 @@ func TestOriginalDefaultsMigrationRollsBackSchemaAndSettingsTogether(t *testing.
 	if _, err = s.db.Exec(`CREATE TRIGGER isolated_migration_failure BEFORE UPDATE ON hub_settings BEGIN SELECT RAISE(ABORT,'isolated migration failure'); END`); err != nil {
 		t.Fatal(err)
 	}
+	stripV8ForMigrationFixture(t, s)
 	if _, err = s.db.Exec(`PRAGMA user_version=2`); err != nil {
 		t.Fatal(err)
 	}
@@ -75,6 +76,7 @@ func TestOriginalDefaultsMigrationFromV2IsTransactionalAndPreservesReports(t *te
 	if err = s.db.QueryRow(`SELECT snapshot_json FROM hub_reports WHERE report_id=?`, id).Scan(&before); err != nil {
 		t.Fatal(err)
 	}
+	stripV8ForMigrationFixture(t, s)
 	if _, err = s.db.Exec(`PRAGMA user_version=2`); err != nil {
 		t.Fatal(err)
 	}
@@ -242,6 +244,7 @@ func TestReviewV2CustomConcurrencyAndTimeoutAreNotMigratedAgain(t *testing.T) {
 	if _, err = s.SaveSettings(t.Context(), testOwner, settings); err != nil {
 		t.Fatal(err)
 	}
+	stripV8ForMigrationFixture(t, s)
 	if _, err = s.db.Exec(`PRAGMA user_version=2`); err != nil {
 		t.Fatal(err)
 	}

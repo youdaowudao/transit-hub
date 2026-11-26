@@ -72,6 +72,10 @@ const query = (params: Params) => {
 export function chanshuiRequestSpec(op: string, p: Params = {}): { path: string; method: string; body?: unknown; revision?: unknown; image?: boolean } {
   switch (op) {
     case 'runtime': return { path: '/runtime', method: 'GET' }
+    case 'recover-runtime': return { path: '/runtime/recover', method: 'POST' }
+    case 'start-batch': return { path: '/batches', method: 'POST', body: p }
+    case 'batches': return { path: `/batches${query(p)}`, method: 'GET' }
+    case 'batch': return { path: `/batches/${key(p.batchId)}${query({ offset: p.offset, limit: p.limit, targetId: p.targetId, model: p.model, status: p.status, view: p.view })}`, method: 'GET' }
     case 'reference-info': return { path: '/reference-info', method: 'GET' }
     case 'targets': return { path: '/targets', method: 'GET' }
     case 'catalog': return { path: '/targets?catalog=1', method: 'GET' }
@@ -119,10 +123,13 @@ export async function requestChanshui<T = unknown>(op: string, params: Params, w
   } catch (error) {
     discardCatalog()
     if (op === 'catalog') throw new ChanshuiError('无法连接调度站，请检查网络后点击“更新分组和账号”重试；本次没有修改主站或开始检测。')
-    if (signal?.aborted) throw new ChanshuiError('页面已关闭或已切换工作区，本次读取已结束。')
-    throw new ChanshuiError('无法连接调度站。请检查网络后重试读取；若刚点击开始，请按原报告编号查询，部分请求可能已经计费。')
+    if (signal?.aborted) throw new ChanshuiError(op === 'start-batch' ? '本次页面等待已结束，尚不能确认批次是否受理。请查询原批次编号，不要另建一批。' : '本次页面等待已结束；若刚开始或停止检测，请核查原编号，不要重复发送。', 0, { operationResult: 'unknown' })
+    throw new ChanshuiError(op === 'start-batch' ? '无法连接调度站，尚不能确认批次是否受理。请检查网络并按原批次编号查询，不要另建一批。' : '无法连接调度站。请检查网络后重试读取；若刚点击开始，请按原报告编号查询，部分请求可能已经计费。', 0, { operationResult: 'unknown' })
   }
   discardCatalog()
+  // A response from an invalidated Host generation must never expire a
+  // new login or publish a late result, even if transport ignored abort.
+  if (signal?.aborted || getAccessToken() !== token) throw new ChanshuiError('检测页面等待已取消或登录已切换，请核查原编号；不会自动重新提交。', 0, { operationResult: 'unknown' })
   if (response.status === 401) { handleAuthExpired(); throw new ChanshuiError(op === 'catalog' ? '调度站登录已失效，请重新登录后读取分组账号；本次没有开始检测。' : '登录已失效，请重新登录后查看原报告。', 401) }
   if (op !== 'catalog' && response.ok && response.headers.get('Content-Type')?.split(';')[0]?.trim().toLowerCase() === resultContentType) return await readResult(response, spec.image === true, onWarning, op === 'items') as T
   if (spec.image && response.ok) {

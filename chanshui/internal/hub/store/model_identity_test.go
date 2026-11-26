@@ -58,6 +58,7 @@ func TestModelIdentityUpgradeAddsOnceAndPreservesFrozenReportsAndFullCatalogue(t
 				before[id] = raw
 			}
 			rows.Close()
+			stripV8ForMigrationFixture(t, s)
 			if _, err = s.db.Exec("PRAGMA user_version=4"); err != nil {
 				t.Fatal(err)
 			}
@@ -123,6 +124,7 @@ func TestModelIdentityUpgradeFailureRollsBackVersionAndAddedRows(t *testing.T) {
 	if err = s.EnsureScope(t.Context(), testOwner); err != nil {
 		t.Fatal(err)
 	}
+	stripV8ForMigrationFixture(t, s)
 	for _, query := range []string{"DELETE FROM hub_questions WHERE question_id='Q10'", "PRAGMA user_version=4", `CREATE TRIGGER reject_identity BEFORE INSERT ON hub_questions WHEN NEW.question_id='Q10' BEGIN SELECT RAISE(ABORT,'isolated migration failure'); END`} {
 		if _, err = s.db.Exec(query); err != nil {
 			t.Fatal(err)
@@ -158,6 +160,7 @@ func TestModelIdentityConcurrentUpgradeAndDisabledQuestionStayStable(t *testing.
 	if _, err = s.db.Exec("DELETE FROM hub_questions WHERE question_id='Q10'"); err != nil {
 		t.Fatal(err)
 	}
+	stripV8ForMigrationFixture(t, s)
 	if _, err = s.db.Exec("PRAGMA user_version=4"); err != nil {
 		t.Fatal(err)
 	}

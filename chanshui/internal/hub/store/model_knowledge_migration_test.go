@@ -37,6 +37,7 @@ func TestV7AddsModelEventsWithoutChangingExistingData(t *testing.T) {
 	if _, err = s.db.Exec(`DELETE FROM hub_questions WHERE question_id IN (?,?)`, oldDeleted, newlyAdded); err != nil {
 		t.Fatal(err)
 	}
+	stripV8ForMigrationFixture(t, s)
 	if _, err = s.db.Exec(`PRAGMA user_version=6`); err != nil {
 		t.Fatal(err)
 	}

@@ -10,12 +10,28 @@ export interface HubSettings { protocol?: string; timeoutSeconds: number; totalT
 export interface HubJudge { type: 'legacy' | 'text' | 'number' | 'keywords' | 'model_identity' | 'manual'; expectedText?: string; expectedNumber?: number; expectedFrom?: string; match?: string; required?: string[]; forbidden?: string[]; referenceAnswer?: string }
 export interface HubQuestion { id: string; title: string; kind: HubKind; enabled: boolean; order: number; maxScore: number; template: string; parameters: Record<string, unknown>; judge: HubJudge; revision?: number }
 export type HubQuestionSummary = Pick<HubQuestion, 'id' | 'title' | 'kind' | 'enabled' | 'order' | 'revision'>;
-export interface HubReport { retry?: { id: string; expectedRetryId: string; itemIds: string[]; attemptsBefore: number; acceptedAtMs: number }; reportId: string; targetId: string; accountName: string; accountId?: string; groupId?: string; groupName: string; model: string; protocol?: string; status: string; createdAtMs: number; startedAtMs?: number; updatedAtMs?: number; queuePosition?: number; queuedCount?: number; stopRequested?: boolean; itemCounts?: Record<string, number>; summary?: Record<string, unknown>; settings?: HubSettings; processExited?: boolean; diagnostic?: string; error?: unknown; taskMemoryMaxBytes?: number; sliceMemoryMaxBytes?: number; swapMaxBytes?: number; memoryPeakBytes?: number }
+export type HubPhase = 'queued' | 'preparing' | 'running' | 'stopping' | 'saving_end' | 'saving_cancel' | 'paused' | 'unknown' | 'ended';
+export interface HubExecutionStatus { executionPhase?: HubPhase; finishConfirmed?: boolean; recoveryDeadlineMs?: number; recoveryReason?: string; stopConfirmDeadlineMs?: number; stopCallPending?: boolean; executionConfirmDeadlineMs?: number }
+export interface HubReport extends HubExecutionStatus { runtime?: HubRuntime; batchId?: string; batchFirstFinishedAtMs?: number; retryId?: string; serverNow?: number; retry?: { id: string; expectedRetryId: string; itemIds: string[]; attemptsBefore: number; acceptedAtMs: number }; reportId: string; targetId: string; accountName: string; accountId?: string; groupId?: string; groupName: string; model: string; protocol?: string; status: string; createdAtMs: number; startedAtMs?: number; updatedAtMs?: number; queuePosition?: number; queuedCount?: number; stopRequested?: boolean; itemCounts?: Record<string, number>; summary?: Record<string, unknown>; settings?: HubSettings; processExited?: boolean; diagnostic?: string; error?: unknown; taskMemoryMaxBytes?: number; sliceMemoryMaxBytes?: number; swapMaxBytes?: number; memoryPeakBytes?: number }
 export interface HubItem { tags?: string[]; itemId: string; sectionId: string; orderIndex?: number; usableInjectionPoints?: 0 | 1 | 2; definition: HubQuestion; prompt: string; expected: string; status: string; attempts?: number; startedAtMs?: number; completedAtMs?: number; imageAvailable?: boolean; result?: { answer?: string; earned?: number | null; max?: number; half?: boolean; judgment?: string | { status?: string; reason?: string; earned?: number | null; max?: number; half?: boolean; source?: string }; error?: string; metrics?: unknown; evidence?: unknown; [key: string]: unknown } }
-export interface HubRuntime { enabled: boolean; available: boolean; reason?: string; memoryCeilingBytes?: number; busy?: boolean; queueBlocked?: boolean; queuedCount?: number; active?: HubReport | null }
+export interface HubRuntime { recoverable?: boolean; serverNow?: number; queryState?: 'busy' | 'retained'; retryAfterMs?: number; recoveryDeadlineMs?: number; recoveryRunning?: boolean; otherActive?: boolean; enabled: boolean; available: boolean; reason?: string; memoryCeilingBytes?: number; busy?: boolean; queueBlocked?: boolean; queuedCount?: number; active?: HubReport | null }
 export interface HubPage<T> { items: T[]; nextCursor?: string }
 export type HubStartApproval = (currentProtocol?: HubProtocol) => boolean;
-export type HubCall = <T = unknown>(op: string, params?: Record<string, unknown>, approveStart?: HubStartApproval) => Promise<T>;
+export interface HubBatchProtocol { targetId: string; groupId: string; protocol?: HubProtocol }
+export interface HubCallOptions { approveBatch?: (protocols: HubBatchProtocol[]) => boolean; signal?: AbortSignal; afterStop?: boolean }
+export type HubCall = <T = unknown>(op: string, params?: Record<string, unknown>, approveStart?: HubStartApproval, options?: HubCallOptions) => Promise<T>;
+export interface HubBatchTask { reportId: string; targetId: string; groupId: string; model: string; expectedContext: Record<string, string> }
+export interface HubBatchRequest { batchId: string; settingsRevision: number; selectedSectionIds: string[]; selectedQuestionIds: string[]; tasks: HubBatchTask[] }
+export interface HubBatchCounts { total: number; active: number; waiting: number; ended: number; unconfirmed: number; complete: number; partial: number; abnormal: number; cancelled: number; retrying: number }
+export type HubBatchState = 'ended' | 'running' | 'unknown' | 'saving_end' | 'paused' | 'queued';
+export interface HubBatchMember { reportId: string; status: string; retryId?: string; retryAcceptedAtMs?: number; timing?: Record<string, unknown>; totalTimeoutSeconds?: number; etaKey?: string; summaryComplete?: boolean; phase: HubPhase; finishConfirmed: boolean }
+export interface HubBatchRow extends Omit<HubReport, 'executionPhase'> { phase: HubPhase }
+export interface HubBatchSummary { batchId: string; createdAtMs: number; firstFinishedAtMs?: number; serverNow: number; observedAt: number; counts: HubBatchCounts; state: HubBatchState; runtime?: HubRuntime; memberStates?: HubBatchMember[]; sections?: {id:string; name:string; count:number}[] }
+export interface HubBatchDetail extends HubBatchSummary { items: HubBatchRow[]; nextOffset?: number; memberStates: HubBatchMember[]; eta: { lowMs: number; highMs: number } | null; etaReason?: string }
+export interface HubBatchPage extends HubPage<HubBatchSummary> { runtime?: HubRuntime }
+export interface HubBatchFilter { targetId: string; model: string; status: string; view: 'progress' | 'results'; offset: number }
+export interface HubBatchAccepted { batchId: string; reportIds: string[]; accepted: boolean; status: string }
+
 
 export interface HubPromptMatch {
   id: string;

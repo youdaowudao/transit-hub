@@ -14,18 +14,19 @@ import (
 )
 
 type Filters struct {
-	FromMs   int64  `json:"fromMs"`
-	ToMs     int64  `json:"toMs"`
-	Scope    string `json:"scope"`
-	From     string `json:"from"`
-	To       string `json:"to"`
-	TargetID string `json:"targetId"`
-	ReportID string `json:"reportId"`
-	Cursor   string `json:"cursor"`
-	Limit    int    `json:"limit"`
-	Kind     string `json:"kind"`
-	Enabled  *bool  `json:"enabled"`
-	Q        string `json:"q"`
+	FromMs     int64  `json:"fromMs"`
+	ToMs       int64  `json:"toMs"`
+	Scope      string `json:"scope"`
+	From       string `json:"from"`
+	To         string `json:"to"`
+	TargetID   string `json:"targetId"`
+	ReportID   string `json:"reportId"`
+	ReportType string `json:"reportType"`
+	Cursor     string `json:"cursor"`
+	Limit      int    `json:"limit"`
+	Kind       string `json:"kind"`
+	Enabled    *bool  `json:"enabled"`
+	Q          string `json:"q"`
 }
 type cursor struct {
 	N  int64  `json:"n"`
@@ -113,14 +114,14 @@ func (s *Store) ListQuestions(ctx context.Context, o Owner, f Filters) (Page[Que
 	return out, rows.Err()
 }
 
-const summaryCols = `report_id,target_id,account_id,account_name,group_id,group_name,base_url,protocol,model,created_at_ms,updated_at_ms,status,summary_json,error_json`
+const summaryCols = `report_id,target_id,account_id,account_name,group_id,group_name,base_url,protocol,model,created_at_ms,updated_at_ms,status,summary_json,error_json,coalesce(batch_id,'')`
 
-const historySummaryCols = `report_id,target_id,account_id,account_name,group_id,group_name,base_url,protocol,model,created_at_ms,updated_at_ms,status,json_object('iqScore',json_extract(summary_json,'$.iqScore'),'totalScore',json_extract(summary_json,'$.totalScore'),'complete',json_extract(summary_json,'$.complete'),'verdict',json_object('scoring_version',json_extract(summary_json,'$.verdict.scoring_version'))),json_object('message',substr(json_extract(error_json,'$.message'),1,512),'step',json_extract(error_json,'$.step'))`
+const historySummaryCols = `report_id,target_id,account_id,account_name,group_id,group_name,base_url,protocol,model,created_at_ms,updated_at_ms,status,json_object('iqScore',json_extract(summary_json,'$.iqScore'),'totalScore',json_extract(summary_json,'$.totalScore'),'complete',json_extract(summary_json,'$.complete'),'verdict',json_object('scoring_version',json_extract(summary_json,'$.verdict.scoring_version'))),json_object('message',substr(json_extract(error_json,'$.message'),1,512),'step',json_extract(error_json,'$.step')),coalesce(batch_id,'')`
 
 func scanSummary(row interface{ Scan(...any) error }) (Summary, error) {
 	v := Summary{}
 	var summary, detail string
-	e := row.Scan(&v.ReportID, &v.TargetID, &v.AccountID, &v.AccountName, &v.GroupID, &v.GroupName, &v.BaseURL, &v.Protocol, &v.Model, &v.CreatedAtMs, &v.UpdatedAtMs, &v.Status, &summary, &detail)
+	e := row.Scan(&v.ReportID, &v.TargetID, &v.AccountID, &v.AccountName, &v.GroupID, &v.GroupName, &v.BaseURL, &v.Protocol, &v.Model, &v.CreatedAtMs, &v.UpdatedAtMs, &v.Status, &summary, &detail, &v.BatchID)
 	v.Summary = json.RawMessage(summary)
 	v.Error = json.RawMessage(detail)
 	return v, e
@@ -140,6 +141,43 @@ func dateBoundary(s string, end bool, loc *time.Location) (int64, error) {
 	}
 	return 0, Fail(422, "日期格式无效，请使用年-月-日", "history")
 }
+func historyRange(f Filters) (int64, int64, error) {
+	loc, e := time.LoadLocation("Asia/Singapore")
+	if e != nil {
+		return 0, 0, e
+	}
+	now := Now().In(loc)
+	midnight := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, loc)
+	from, to := midnight.AddDate(0, 0, -30).UnixMilli(), midnight.AddDate(0, 0, 1).UnixMilli()
+	if f.Scope == "sidebar" {
+		from = midnight.AddDate(0, 0, -1).UnixMilli()
+	} else {
+		if f.From != "" {
+			from, e = dateBoundary(f.From, false, loc)
+			if e != nil {
+				return 0, 0, e
+			}
+		}
+		if f.To != "" {
+			to, e = dateBoundary(f.To, true, loc)
+			if e != nil {
+				return 0, 0, e
+			}
+		}
+	}
+	if f.Scope != "sidebar" {
+		if f.FromMs != 0 {
+			from = f.FromMs
+		}
+		if f.ToMs != 0 {
+			to = f.ToMs
+		}
+	}
+	if from >= to {
+		return 0, 0, Fail(422, "开始日期必须早于结束日期", "history")
+	}
+	return from, to, nil
+}
 func (s *Store) ListReports(ctx context.Context, o Owner, f Filters) (Page[Summary], error) {
 	out := Page[Summary]{Items: []Summary{}}
 	if e := o.Validate(); e != nil {
@@ -156,42 +194,18 @@ func (s *Store) ListReports(ctx context.Context, o Owner, f Filters) (Page[Summa
 	if limit < 1 || limit > 50 {
 		return out, Fail(422, "每页报告数必须为1～50", "pagination")
 	}
-	loc, e := time.LoadLocation("Asia/Singapore")
+	from, to, e := historyRange(f)
 	if e != nil {
 		return out, e
 	}
-	now := Now().In(loc)
-	midnight := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, loc)
-	from, to := midnight.AddDate(0, 0, -30).UnixMilli(), midnight.AddDate(0, 0, 1).UnixMilli()
-	if f.Scope == "sidebar" {
-		from = midnight.AddDate(0, 0, -1).UnixMilli()
-	} else {
-		if f.From != "" {
-			from, e = dateBoundary(f.From, false, loc)
-			if e != nil {
-				return out, e
-			}
-		}
-		if f.To != "" {
-			to, e = dateBoundary(f.To, true, loc)
-			if e != nil {
-				return out, e
-			}
-		}
-	}
-	if f.Scope != "sidebar" {
-		if f.FromMs != 0 {
-			from = f.FromMs
-		}
-		if f.ToMs != 0 {
-			to = f.ToMs
-		}
-	}
-	if from >= to {
-		return out, Fail(422, "开始日期必须早于结束日期", "history")
-	}
 	q := `SELECT ` + historySummaryCols + ` FROM hub_reports WHERE user_id=? AND workspace_id=? AND created_at_ms>=? AND created_at_ms<?`
 	args := []any{o.UserID, o.WorkspaceID, from, to}
+	if f.ReportType != "" && f.ReportType != "all" && f.ReportType != "single" {
+		return out, Fail(422, "报告类型无效，请选择单次检测或全部报告", "history")
+	}
+	if f.Scope == "sidebar" || f.ReportType == "single" {
+		q += ` AND batch_id IS NULL`
+	}
 	if f.TargetID != "" {
 		q += ` AND target_id=?`
 		args = append(args, f.TargetID)
@@ -249,6 +263,11 @@ func readReport(ctx context.Context, reader reportReader, o Owner, id string) (R
 		return Report{}, e
 	}
 	out := Report{Summary: v, ItemCounts: map[string]int{}}
+	if v.BatchID != "" {
+		if e = reader.QueryRowContext(ctx, `SELECT first_finished_at_ms FROM hub_batches WHERE user_id=? AND workspace_id=? AND batch_id=?`, o.UserID, o.WorkspaceID, v.BatchID).Scan(&out.BatchFirstFinishedAtMs); e != nil {
+			return out, e
+		}
+	}
 	var requestRaw string
 	if e = reader.QueryRowContext(ctx, `SELECT request_json FROM hub_reports WHERE user_id=? AND workspace_id=? AND report_id=?`, o.UserID, o.WorkspaceID, id).Scan(&requestRaw); e != nil {
 		return out, e
@@ -414,8 +433,8 @@ func (s *Store) Image(ctx context.Context, o Owner, id, itemID string) ([]byte, 
 	return b, e
 }
 func (s *Store) Exists(ctx context.Context, o Owner, id string, request []byte) (bool, error) {
-	var u, w, raw string
-	e := s.db.QueryRowContext(ctx, `SELECT user_id,workspace_id,request_json FROM hub_reports WHERE report_id=?`, id).Scan(&u, &w, &raw)
+	var u, w, raw, batchID string
+	e := s.db.QueryRowContext(ctx, `SELECT user_id,workspace_id,request_json,coalesce(batch_id,'') FROM hub_reports WHERE report_id=?`, id).Scan(&u, &w, &raw, &batchID)
 	if e == sql.ErrNoRows {
 		return false, nil
 	}
@@ -424,6 +443,9 @@ func (s *Store) Exists(ctx context.Context, o Owner, id string, request []byte) 
 	}
 	if u != o.UserID || w != o.WorkspaceID {
 		return true, Fail(404, "报告不存在或不属于当前工作区", "report")
+	}
+	if request != nil && batchID != "" {
+		return true, Fail(409, "这是已保存批次中的报告，请按批次编号查看受理结果，不会将其再次作为单次检测发送", "create")
 	}
 	if request != nil && strings.TrimSpace(raw) != string(request) {
 		return true, Fail(409, "相同报告编号的检测选择已改变，请保留原任务或明确新建检测", "create")

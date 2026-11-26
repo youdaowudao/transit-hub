@@ -55,6 +55,7 @@ describe('父页真实HTTP到原检测页面的回收警告', () => {
       if (path.endsWith(`/reports/${reportId}`)) return new Response(JSON.stringify(report))
       if (path.endsWith(`/reports/${reportId}/items`)) return resultResponse({ items: [{ itemId: 'custom:1', status: 'done', definition: { id: 'custom:1', title: '已经读出的题目', kind: 'iq', maxScore: 0, judge: { type: 'manual' } }, prompt: '原题', expected: '', result: { answer: '已经完整读出的回答' } }] }, 'application/json', partial ? { complete: false, error: { message: '本次页面返回值不完整，请重新读取。' } } : {})
       if (path.endsWith('/reports')) return resultResponse({ items: [report] })
+      if (path.endsWith('/batches')) return resultResponse({ items: [] })
       if (path.endsWith('/questions')) return resultResponse({ items: [] })
       throw new Error(`Unexpected fixture route ${path}`)
     })
@@ -387,7 +388,7 @@ describe('手动运行状态核查', () => {
     expect(container.textContent).not.toContain('连续三次无法读取')
     expect(container.textContent).not.toContain('当前任务：')
     expect(calls.slice(before).filter(c => c.op === 'report')).toHaveLength(1)
-    expect(pendingPolls).toHaveLength(0)
+    expect(pendingPolls).toHaveLength(1) // 已结束的报告只保留顶部runtime循环
     await click('新建检测')
     expect(Array.from(container.querySelectorAll('button')).find(b => b.textContent?.trim() === '开始检测')?.disabled).toBe(false)
     expect(calls.some(c => c.op === 'start')).toBe(false)
@@ -396,12 +397,12 @@ describe('手动运行状态核查', () => {
     const { state, calls, pendingPolls } = await setup(true, true)
     expect(container.textContent).toContain('当前已有检测正在执行')
     expect(Array.from(container.querySelectorAll('button')).find(b => b.textContent?.trim() === '加入等待队列')?.disabled).toBe(false)
-    expect(pendingPolls).toHaveLength(0)
+    expect(pendingPolls).toHaveLength(1)
     state.busy = false; state.phase = 'recovered'
     await click('核查运行状态')
     expect(container.textContent).not.toContain('当前已有检测正在执行')
     expect(Array.from(container.querySelectorAll('button')).find(b => b.textContent?.trim() === '开始检测')?.disabled).toBe(false)
-    expect(pendingPolls).toHaveLength(0)
+    expect(pendingPolls).toHaveLength(1) // 一个静态页runtime循环，不再轮询结束报告
     expect(calls.some(c => c.op === 'start')).toBe(false)
   })
 
@@ -411,10 +412,14 @@ describe('手动运行状态核查', () => {
     await run(() => respond({ kind: 'chanshui.VISIBILITY', v: 1, generation: 1, visible: false }))
     const before = calls.length
     state.phase = 'recovered'; state.available = true
+    // 收起时不发状态请求；重开恢复唯一 runtime 循环。
     await click('核查运行状态')
+    expect(calls).toHaveLength(before)
+    await run(() => respond({ kind: 'chanshui.VISIBILITY', v: 1, generation: 1, visible: true })); await tick()
     expect(container.textContent).not.toContain('当前任务：')
     expect(Array.from(container.querySelectorAll('button')).find(b => b.textContent?.trim() === '开始检测')?.disabled).toBe(false)
-    expect(calls.slice(before).map(c => c.op)).toEqual(['runtime'])
+    expect(calls.slice(before).filter(c => c.op === 'runtime')).toHaveLength(1)
+    expect(calls.slice(before).some(c => c.op === 'report' || c.op === 'start' || c.op === 'models')).toBe(false)
     expect(calls.some(c => c.op === 'start')).toBe(false)
   })
 
@@ -442,7 +447,7 @@ describe('手动运行状态核查', () => {
     await run(heldReports[0]); await tick()
     expect(container.textContent).toContain('服务器不再保留这次检测进程')
     expect(container.textContent).not.toContain('当前任务：')
-    expect(pendingPolls).toHaveLength(0)
+    expect(pendingPolls).toHaveLength(1) // 一个静态页runtime循环，不再轮询结束报告
     expect(calls.some(c => c.op === 'start')).toBe(false)
   })
 

@@ -78,215 +78,12 @@ func (s *Store) CreateReport(ctx context.Context, o Owner, r CreateRequest) (Rep
 			return e
 		}
 		defer tx.Rollback()
-		var raw string
-		var settings Settings
-		var rev int
-		if e = tx.QueryRowContext(ctx, "SELECT settings_json,revision FROM hub_settings WHERE user_id=? AND workspace_id=?", o.UserID, o.WorkspaceID).Scan(&raw, &rev); e != nil {
-			return e
-		}
-		if e = json.Unmarshal([]byte(raw), &settings); e != nil {
-			return e
-		}
-		settings.Revision = rev
-		sections, ids := map[string]bool{}, map[string]bool{}
-		for _, s := range r.SelectedSectionIDs {
-			sections[s] = true
-		}
-		for _, id := range r.SelectedQuestionIDs {
-			ids[id] = true
-		}
-		rows, e := tx.QueryContext(ctx, `SELECT definition_json,revision FROM hub_questions WHERE user_id=? AND workspace_id=? AND (json_extract(definition_json,'$.enabled')=1 OR (question_id='cache' AND revision=1 AND json_extract(definition_json,'$.enabled')=0)) ORDER BY json_extract(definition_json,'$.order'),question_id`, o.UserID, o.WorkspaceID)
+		settings, defs, e := prepareReport(ctx, tx, o, r, 0)
 		if e != nil {
 			return e
 		}
-		defs := []questions.Definition{}
-		for rows.Next() {
-			var b string
-			var revision int
-			if e = rows.Scan(&b, &revision); e != nil {
-				rows.Close()
-				return e
-			}
-			var q questions.Definition
-			if e = json.Unmarshal([]byte(b), &q); e != nil {
-				rows.Close()
-				return e
-			}
-			q.Revision = revision
-			// The untouched original cache default means the homepage checkbox
-			// starts it only for this report. Explicit edits/deletion stay final.
-			if !q.Enabled && !(q.ID == "cache" && revision == 1 && questions.Compatible(q) && (sections["cache"] || ids["cache"])) {
-				continue
-			}
-			section := q.Kind
-			if strings.HasPrefix(section, "fingerprint_") {
-				section = "fingerprint"
-			}
-			if len(sections) > 0 && !sections[q.Kind] && !sections[section] {
-				continue
-			}
-			if len(ids) > 0 && !ids[q.ID] {
-				continue
-			}
-			defs = append(defs, q)
-			if len(defs) > 128+len(questions.ModelAdditionIDs()) {
-				rows.Close()
-				return Fail(422, "本次选择超过128项，请减少检测项", "create")
-			}
-		}
-		if e = rows.Err(); e != nil {
-			rows.Close()
+		if e = createReportTx(ctx, tx, o, r, req, settings, defs, "", 0); e != nil {
 			return e
-		}
-		rows.Close()
-		// 板块选择遇到用户修改过的题库时，保留旧的逐题范围；新增默认题只有明确选择才加入。
-		fullModelBank := len(ids) == 0 && questions.MatchesModelDefinitions(defs)
-		if len(ids) == 0 && !fullModelBank {
-			filtered := defs[:0]
-			for _, q := range defs {
-				if questions.IsUntouchedModelAddition(q) {
-					continue
-				}
-				filtered = append(filtered, q)
-			}
-			defs = filtered
-		}
-		if r.SingleAsk != nil {
-			defs = []questions.Definition{{ID: "custom:" + r.ReportID, Title: "单问单答", Kind: "iq", Enabled: true, Order: 100, Template: r.SingleAsk.Prompt, Parameters: map[string]any{"generator": "static"}, Judge: questions.Judge{Type: "manual"}}}
-		}
-		countedDefs := len(defs)
-		if fullModelBank && r.SingleAsk == nil {
-			countedDefs -= len(questions.ModelAdditionIDs())
-		}
-		if countedDefs > 128 {
-			return Fail(422, "本次选择超过128项，请减少检测项", "create")
-		}
-		if len(defs) == 0 {
-			return Fail(422, "没有可执行的题目，请在设置中新增或启用题目并重新选择", "create")
-		}
-		snap := Snapshot{SingleAsk: r.SingleAsk, Settings: settings, Questions: []questions.Generated{}, UpstreamVersion: "308315dc9c0dd83504f042bde2a96e82e243fe73"}
-		counts := map[string]int{}
-		var paperSeedBytes [8]byte
-		if _, e = rand.Read(paperSeedBytes[:]); e != nil {
-			return e
-		}
-		paperSeed := int64(binary.LittleEndian.Uint64(paperSeedBytes[:]) & 0x1fffffffffffff)
-		for _, q := range defs {
-			if q.Kind != "knowledge" || !questions.IsModelAddition(q.ID) {
-				counts[q.Kind]++
-			}
-			if limit := enabledQuestionLimit(q.Kind); limit > 0 && counts[q.Kind] > limit {
-				return Fail(422, "推理题最多启用32道，知识题最多启用40道。请在检测设置禁用多余题目后重试，未创建报告或发送请求。", "create")
-			}
-			var seedBytes [8]byte
-			if _, e = rand.Read(seedBytes[:]); e != nil {
-				return e
-			}
-			seed := int64(binary.LittleEndian.Uint64(seedBytes[:]) & 0x1fffffffffffff)
-			if questions.IsOriginalQuestion(q) {
-				seed = paperSeed
-			}
-			var g questions.Generated
-			if r.SingleAsk != nil {
-				g = questions.Generated{Definition: q, Seed: seed, Prompt: r.SingleAsk.Prompt}
-			} else {
-				g, e = questions.Generate(q, seed)
-			}
-			if e != nil {
-				return Fail(422, fmt.Sprintf("题目%s无法生成：%s", q.Title, e), "generate")
-			}
-			snap.Questions = append(snap.Questions, g)
-		}
-		snapshotJSON, e := json.Marshal(snap)
-		if e != nil {
-			return e
-		}
-		if len(snapshotJSON) > 512<<10 {
-			return Fail(422, "本次题目快照超过512KiB，请减少题目或缩短正文", "create")
-		}
-		target := r.Target
-		if target.AccountID == "" {
-			target.AccountID = r.AccountID
-		}
-		if target.AccountName == "" {
-			target.AccountName = r.AccountName
-		}
-		if target.GroupName == "" {
-			target.GroupName = r.GroupName
-		}
-		if target.BaseURL == "" {
-			target.BaseURL = r.BaseURL
-		}
-		if target.Protocol == "" {
-			target.Protocol = r.Protocol
-		}
-		groupID := ""
-		if r.GroupID != nil {
-			groupID = fmt.Sprint(r.GroupID)
-		}
-		now := Now().UnixMilli()
-		_, e = tx.ExecContext(ctx, `INSERT INTO hub_reports(report_id,user_id,workspace_id,target_id,account_id,account_name,group_id,group_name,base_url,protocol,model,created_at_ms,updated_at_ms,status,request_json,snapshot_json) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,'queued',?,?)`, r.ReportID, o.UserID, o.WorkspaceID, r.TargetID, target.AccountID, target.AccountName, groupID, target.GroupName, target.BaseURL, target.Protocol, r.Model, now, now, string(req), string(snapshotJSON))
-		if e != nil {
-			return e
-		}
-		unasked := map[string]bool{}
-		if r.SingleAsk != nil {
-			if _, err := tx.ExecContext(ctx, `UPDATE hub_reports SET summary_json='{"singleAsk":true}' WHERE report_id=?`, r.ReportID); err != nil {
-				return err
-			}
-		} else {
-			verdict := api.Verdict{ScoringVersion: api.HubScoringVersion}
-			initial := map[string]any{}
-			if group, ok := knowledge.GroupForModel(r.Model); ok && questions.MatchesModelKnowledge(snap.Questions) {
-				initialKnowledge := knowledge.ModelGroupVerdict(group, nil, "", 0)
-				initialKnowledge.Reason = "型号题组尚未完成，可查看检测状态和已保存的回答。"
-				if len(group.Know) == 0 {
-					initialKnowledge.Reason += "该型号的证明题尚未补齐，暂无法确认。"
-				}
-				initialKnowledge.BoundaryReview.Reason = "pending"
-				verdict.Knowledge = initialKnowledge
-				initial["knowledge"] = verdict.Knowledge
-				selected := map[string]bool{}
-				for _, eventID := range append(append([]string{}, group.Know...), group.Newer...) {
-					selected["knowledge:"+eventID] = true
-				}
-				for _, q := range snap.Questions {
-					if q.Definition.Kind == "knowledge" && !selected[q.Definition.ID] {
-						unasked[q.Definition.ID] = true
-					}
-				}
-			} else if questions.MatchesCurrentKnowledge(snap.Questions) || questions.MatchesModelKnowledge(snap.Questions) {
-				verdict.Knowledge = knowledge.InitialCrossYear()
-				initial["knowledge"] = verdict.Knowledge
-				if questions.MatchesModelKnowledge(snap.Questions) {
-					for _, itemID := range questions.ModelAdditionIDs() {
-						unasked[itemID] = true
-					}
-				}
-			}
-			initial["verdict"] = verdict
-			summary, err := json.Marshal(initial)
-			if err != nil {
-				return err
-			}
-			if _, err := tx.ExecContext(ctx, `UPDATE hub_reports SET summary_json=? WHERE report_id=?`, string(summary), r.ReportID); err != nil {
-				return err
-			}
-		}
-		for i, g := range snap.Questions {
-			raw, _ := json.Marshal(g)
-			var image any
-			if len(g.Image) > 0 {
-				image = g.Image
-			}
-			status, result := "queued", "{}"
-			if unasked[g.Definition.ID] {
-				status = "done"
-				result = `{"judgment":{"status":"not_asked","reason":"本轮不会提问这道题，不算答错。"}}`
-			}
-			if _, e = tx.ExecContext(ctx, `INSERT INTO hub_items(report_id,item_id,section_id,order_index,status,result_json,question_json,image) VALUES(?,?,?,?,?,?,?,?)`, r.ReportID, g.Definition.ID, g.Definition.Kind, i, status, result, string(raw), image); e != nil {
-				return e
-			}
 		}
 		return tx.Commit()
 	})
@@ -295,6 +92,251 @@ func (s *Store) CreateReport(ctx context.Context, o Owner, r CreateRequest) (Rep
 	}
 	return s.Report(ctx, o, r.ReportID)
 }
+
+// prepareReport is shared by single and batch creation. Batches freeze the
+// saved settings revision and read the selected question definitions once.
+func prepareReport(ctx context.Context, tx *sql.Tx, o Owner, r CreateRequest, settingsRevision int) (Settings, []questions.Definition, error) {
+	var raw string
+	var settings Settings
+	var rev int
+	var e error
+	if e = tx.QueryRowContext(ctx, "SELECT settings_json,revision FROM hub_settings WHERE user_id=? AND workspace_id=?", o.UserID, o.WorkspaceID).Scan(&raw, &rev); e != nil {
+		if e == sql.ErrNoRows && settingsRevision > 0 {
+			return Settings{}, nil, Conflict("尚未保存当前工作区的检测设置，请重新打开检测设置和确认批次清单；本次未创建报告或发送请求", "settings", 0)
+		}
+		return Settings{}, nil, e
+	}
+	if e = json.Unmarshal([]byte(raw), &settings); e != nil {
+		return Settings{}, nil, e
+	}
+	settings.Revision = rev
+	if settingsRevision > 0 && rev != settingsRevision {
+		return Settings{}, nil, Conflict("检测设置已更新，请重新读取设置和确认整批任务；本次未创建报告或发送请求", "settings", rev)
+	}
+	sections, ids := map[string]bool{}, map[string]bool{}
+	for _, s := range r.SelectedSectionIDs {
+		sections[s] = true
+	}
+	for _, id := range r.SelectedQuestionIDs {
+		ids[id] = true
+	}
+	rows, e := tx.QueryContext(ctx, `SELECT definition_json,revision FROM hub_questions WHERE user_id=? AND workspace_id=? AND (json_extract(definition_json,'$.enabled')=1 OR (question_id='cache' AND revision=1 AND json_extract(definition_json,'$.enabled')=0)) ORDER BY json_extract(definition_json,'$.order'),question_id`, o.UserID, o.WorkspaceID)
+	if e != nil {
+		return Settings{}, nil, e
+	}
+	defs := []questions.Definition{}
+	available := map[string]bool{}
+	for rows.Next() {
+		var b string
+		var revision int
+		if e = rows.Scan(&b, &revision); e != nil {
+			rows.Close()
+			return Settings{}, nil, e
+		}
+		var q questions.Definition
+		if e = json.Unmarshal([]byte(b), &q); e != nil {
+			rows.Close()
+			return Settings{}, nil, e
+		}
+		q.Revision = revision
+		// The untouched original cache default means the homepage checkbox
+		// starts it only for this report. Explicit edits/deletion stay final.
+		if !q.Enabled && !(q.ID == "cache" && revision == 1 && questions.Compatible(q) && (sections["cache"] || ids["cache"])) {
+			continue
+		}
+		if settingsRevision > 0 {
+			available[q.ID] = true
+		}
+		section := q.Kind
+		if strings.HasPrefix(section, "fingerprint_") {
+			section = "fingerprint"
+		}
+		if len(sections) > 0 && !sections[q.Kind] && !sections[section] {
+			continue
+		}
+		if len(ids) > 0 && !ids[q.ID] {
+			continue
+		}
+		defs = append(defs, q)
+		if len(defs) > 128+len(questions.ModelAdditionIDs()) {
+			rows.Close()
+			return Settings{}, nil, Fail(422, "本次选择超过128项，请减少检测项", "create")
+		}
+	}
+	if e = rows.Err(); e != nil {
+		rows.Close()
+		return Settings{}, nil, e
+	}
+	rows.Close()
+	if settingsRevision > 0 {
+		for id := range ids {
+			if !available[id] {
+				return Settings{}, nil, Fail(422, "所选题目不存在或未启用："+id+"；请重新读取题库后确认整批任务，本次未创建报告或发送请求", "create")
+			}
+		}
+	}
+	// 板块选择遇到用户修改过的题库时，保留旧的逐题范围；新增默认题只有明确选择才加入。
+	fullModelBank := len(ids) == 0 && questions.MatchesModelDefinitions(defs)
+	if len(ids) == 0 && !fullModelBank {
+		filtered := defs[:0]
+		for _, q := range defs {
+			if questions.IsUntouchedModelAddition(q) {
+				continue
+			}
+			filtered = append(filtered, q)
+		}
+		defs = filtered
+	}
+	if r.SingleAsk != nil {
+		defs = []questions.Definition{{ID: "custom:" + r.ReportID, Title: "单问单答", Kind: "iq", Enabled: true, Order: 100, Template: r.SingleAsk.Prompt, Parameters: map[string]any{"generator": "static"}, Judge: questions.Judge{Type: "manual"}}}
+	}
+	countedDefs := len(defs)
+	if fullModelBank && r.SingleAsk == nil {
+		countedDefs -= len(questions.ModelAdditionIDs())
+	}
+	if countedDefs > 128 {
+		return Settings{}, nil, Fail(422, "本次选择超过128项，请减少检测项", "create")
+	}
+	if len(defs) == 0 {
+		return Settings{}, nil, Fail(422, "没有可执行的题目，请在设置中新增或启用题目并重新选择", "create")
+	}
+	return settings, defs, nil
+}
+
+// createReportTx creates just one paper; in a batch the next paper is not
+// generated until this paper's snapshot and items have been saved.
+func createReportTx(ctx context.Context, tx *sql.Tx, o Owner, r CreateRequest, req []byte, settings Settings, defs []questions.Definition, batchID string, createdAt int64) error {
+	var e error
+	snap := Snapshot{SingleAsk: r.SingleAsk, Settings: settings, Questions: []questions.Generated{}, UpstreamVersion: "308315dc9c0dd83504f042bde2a96e82e243fe73"}
+	counts := map[string]int{}
+	var paperSeedBytes [8]byte
+	if _, e = rand.Read(paperSeedBytes[:]); e != nil {
+		return e
+	}
+	paperSeed := int64(binary.LittleEndian.Uint64(paperSeedBytes[:]) & 0x1fffffffffffff)
+	for _, q := range defs {
+		if q.Kind != "knowledge" || !questions.IsModelAddition(q.ID) {
+			counts[q.Kind]++
+		}
+		if limit := enabledQuestionLimit(q.Kind); limit > 0 && counts[q.Kind] > limit {
+			return Fail(422, "推理题最多启用32道，知识题最多启用40道。请在检测设置禁用多余题目后重试，未创建报告或发送请求。", "create")
+		}
+		var seedBytes [8]byte
+		if _, e = rand.Read(seedBytes[:]); e != nil {
+			return e
+		}
+		seed := int64(binary.LittleEndian.Uint64(seedBytes[:]) & 0x1fffffffffffff)
+		if questions.IsOriginalQuestion(q) {
+			seed = paperSeed
+		}
+		var g questions.Generated
+		if r.SingleAsk != nil {
+			g = questions.Generated{Definition: q, Seed: seed, Prompt: r.SingleAsk.Prompt}
+		} else {
+			g, e = questions.Generate(q, seed)
+		}
+		if e != nil {
+			return Fail(422, fmt.Sprintf("题目%s无法生成：%s", q.Title, e), "generate")
+		}
+		snap.Questions = append(snap.Questions, g)
+	}
+	snapshotJSON, e := json.Marshal(snap)
+	if e != nil {
+		return e
+	}
+	if len(snapshotJSON) > 512<<10 {
+		return Fail(422, "本次题目快照超过512KiB，请减少题目或缩短正文", "create")
+	}
+	target := r.Target
+	if target.AccountID == "" {
+		target.AccountID = r.AccountID
+	}
+	if target.AccountName == "" {
+		target.AccountName = r.AccountName
+	}
+	if target.GroupName == "" {
+		target.GroupName = r.GroupName
+	}
+	if target.BaseURL == "" {
+		target.BaseURL = r.BaseURL
+	}
+	if target.Protocol == "" {
+		target.Protocol = r.Protocol
+	}
+	groupID := ""
+	if r.GroupID != nil {
+		groupID = fmt.Sprint(r.GroupID)
+	}
+	now := createdAt
+	if now == 0 {
+		now = Now().UnixMilli()
+	}
+	_, e = tx.ExecContext(ctx, `INSERT INTO hub_reports(report_id,user_id,workspace_id,target_id,account_id,account_name,group_id,group_name,base_url,protocol,model,created_at_ms,updated_at_ms,status,request_json,snapshot_json,batch_id) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,'queued',?,?,?)`, r.ReportID, o.UserID, o.WorkspaceID, r.TargetID, target.AccountID, target.AccountName, groupID, target.GroupName, target.BaseURL, target.Protocol, r.Model, now, now, string(req), string(snapshotJSON), sql.NullString{String: batchID, Valid: batchID != ""})
+	if e != nil {
+		return e
+	}
+	unasked := map[string]bool{}
+	if r.SingleAsk != nil {
+		if _, err := tx.ExecContext(ctx, `UPDATE hub_reports SET summary_json='{"singleAsk":true}' WHERE report_id=?`, r.ReportID); err != nil {
+			return err
+		}
+	} else {
+		verdict := api.Verdict{ScoringVersion: api.HubScoringVersion}
+		initial := map[string]any{}
+		if group, ok := knowledge.GroupForModel(r.Model); ok && questions.MatchesModelKnowledge(snap.Questions) {
+			initialKnowledge := knowledge.ModelGroupVerdict(group, nil, "", 0)
+			initialKnowledge.Reason = "型号题组尚未完成，可查看检测状态和已保存的回答。"
+			if len(group.Know) == 0 {
+				initialKnowledge.Reason += "该型号的证明题尚未补齐，暂无法确认。"
+			}
+			initialKnowledge.BoundaryReview.Reason = "pending"
+			verdict.Knowledge = initialKnowledge
+			initial["knowledge"] = verdict.Knowledge
+			selected := map[string]bool{}
+			for _, eventID := range append(append([]string{}, group.Know...), group.Newer...) {
+				selected["knowledge:"+eventID] = true
+			}
+			for _, q := range snap.Questions {
+				if q.Definition.Kind == "knowledge" && !selected[q.Definition.ID] {
+					unasked[q.Definition.ID] = true
+				}
+			}
+		} else if questions.MatchesCurrentKnowledge(snap.Questions) || questions.MatchesModelKnowledge(snap.Questions) {
+			verdict.Knowledge = knowledge.InitialCrossYear()
+			initial["knowledge"] = verdict.Knowledge
+			if questions.MatchesModelKnowledge(snap.Questions) {
+				for _, itemID := range questions.ModelAdditionIDs() {
+					unasked[itemID] = true
+				}
+			}
+		}
+		initial["verdict"] = verdict
+		summary, err := json.Marshal(initial)
+		if err != nil {
+			return err
+		}
+		if _, err := tx.ExecContext(ctx, `UPDATE hub_reports SET summary_json=? WHERE report_id=?`, string(summary), r.ReportID); err != nil {
+			return err
+		}
+	}
+	for i, g := range snap.Questions {
+		raw, _ := json.Marshal(g)
+		var image any
+		if len(g.Image) > 0 {
+			image = g.Image
+		}
+		status, result := "queued", "{}"
+		if unasked[g.Definition.ID] {
+			status = "done"
+			result = `{"judgment":{"status":"not_asked","reason":"本轮不会提问这道题，不算答错。"}}`
+		}
+		if _, e = tx.ExecContext(ctx, `INSERT INTO hub_items(report_id,item_id,section_id,order_index,status,result_json,question_json,image) VALUES(?,?,?,?,?,?,?,?)`, r.ReportID, g.Definition.ID, g.Definition.Kind, i, status, result, string(raw), image); e != nil {
+			return e
+		}
+	}
+	return nil
+}
+
 func (s *Store) LoadRun(ctx context.Context, o Owner, id string) (Report, Snapshot, error) {
 	r, e := s.Report(ctx, o, id)
 	if e != nil {
@@ -366,7 +408,7 @@ func (s *Store) Finish(ctx context.Context, o Owner, id, status string, summary,
 		return e
 	})
 }
-func (s *Store) FinishInterrupted(ctx context.Context, o Owner, id string, detail any) error {
+func (s *Store) FinishInterrupted(ctx context.Context, o Owner, id string, detail any, mayFinalizeBatch ...bool) error {
 	r, e := s.Report(ctx, o, id)
 	if e != nil {
 		return e
@@ -377,20 +419,42 @@ func (s *Store) FinishInterrupted(ctx context.Context, o Owner, id string, detai
 		summary = map[string]any{}
 	}
 	summary["complete"] = false
-	return s.Finish(ctx, o, id, "interrupted", summary, detail)
+	if r.BatchID == "" || len(mayFinalizeBatch) == 0 || !mayFinalizeBatch[0] {
+		return s.Finish(ctx, o, id, "interrupted", summary, detail)
+	}
+	raw, _ := json.Marshal(summary)
+	d, _ := json.Marshal(detail)
+	return retryWrite(ctx, func() error {
+		tx, err := s.db.BeginTx(ctx, nil)
+		if err != nil {
+			return err
+		}
+		defer tx.Rollback()
+		_, err = tx.ExecContext(ctx, `UPDATE hub_reports SET status='interrupted',summary_json=?,error_json=?,updated_at_ms=? WHERE user_id=? AND workspace_id=? AND report_id=? AND status IN('queued','running')`, string(raw), string(d), Now().UnixMilli(), o.UserID, o.WorkspaceID, id)
+		if err != nil {
+			return err
+		}
+		// A normally finished report is also finalized only here, after its
+		// executor confirmed exit. Never overwrite its actual result.
+		if err = FinalizeBatchFirstRun(ctx, tx, o, r.BatchID); err != nil {
+			return err
+		}
+		return tx.Commit()
+	})
 }
 
 // CancelQueued never changes a running or completed report. The caller removes
 // its FIFO entry only after this state transition has been committed.
-func (s *Store) CancelQueued(ctx context.Context, o Owner, id string) error {
+func (s *Store) CancelQueued(ctx context.Context, o Owner, id string, mayFinalizeBatch ...bool) error {
 	r, err := s.Report(ctx, o, id)
 	if err != nil {
 		return err
 	}
-	if r.Status == "cancelled" || r.Status == "done" || r.Status == "partial" || r.Status == "interrupted" {
+	finalize := r.BatchID != "" && len(mayFinalizeBatch) > 0 && mayFinalizeBatch[0]
+	if terminalStatus(r.Status) && !finalize {
 		return nil
 	}
-	if r.Status != "queued" {
+	if r.Status != "queued" && !terminalStatus(r.Status) {
 		return Fail(409, "本报告已开始执行，请停止正在运行的检测；未取消其他任务", "cancel")
 	}
 	summary := map[string]any{}
@@ -400,8 +464,14 @@ func (s *Store) CancelQueued(ctx context.Context, o Owner, id string) error {
 	}
 	summary["complete"] = false
 	summaryJSON, _ := json.Marshal(summary)
-	return retryWrite(ctx, func() error {
-		res, err := s.db.ExecContext(ctx, `UPDATE hub_reports SET status='cancelled',updated_at_ms=?,summary_json=?,error_json='{"message":"已取消等待，本轮没有发送检测请求；此前已保存的结果保留","step":"cancel","operationResult":"not_started"}' WHERE user_id=? AND workspace_id=? AND report_id=? AND status='queued'`, Now().UnixMilli(), string(summaryJSON), o.UserID, o.WorkspaceID, id)
+	cancel := func(q interface {
+		reportReader
+		ExecContext(context.Context, string, ...any) (sql.Result, error)
+	}) error {
+		if terminalStatus(r.Status) {
+			return nil
+		}
+		res, err := q.ExecContext(ctx, `UPDATE hub_reports SET status='cancelled',updated_at_ms=?,summary_json=?,error_json='{"message":"已取消等待，本轮没有发送检测请求；此前已保存的结果保留","step":"cancel","operationResult":"not_started"}' WHERE user_id=? AND workspace_id=? AND report_id=? AND status='queued'`, Now().UnixMilli(), string(summaryJSON), o.UserID, o.WorkspaceID, id)
 		if err != nil {
 			return err
 		}
@@ -410,22 +480,57 @@ func (s *Store) CancelQueued(ctx context.Context, o Owner, id string) error {
 			return err
 		}
 		if n != 1 {
-			current, readErr := s.Report(ctx, o, id)
+			current, readErr := readReport(ctx, q, o, id)
 			if readErr != nil {
 				return readErr
 			}
-			if current.Status == "cancelled" || current.Status == "done" || current.Status == "partial" || current.Status == "interrupted" {
+			if terminalStatus(current.Status) {
 				return nil
 			}
 			return Fail(409, "报告状态已变化，请重新读取后停止正在运行的检测；未覆盖已保存结果", "cancel")
 		}
 		return nil
+	}
+	return retryWrite(ctx, func() error {
+		if !finalize {
+			return cancel(s.db)
+		}
+		tx, err := s.db.BeginTx(ctx, nil)
+		if err != nil {
+			return err
+		}
+		defer tx.Rollback()
+		if err = cancel(tx); err != nil {
+			return err
+		}
+		if err = FinalizeBatchFirstRun(ctx, tx, o, r.BatchID); err != nil {
+			return err
+		}
+		return tx.Commit()
 	})
 }
+
+func terminalStatus(status string) bool {
+	return status == "done" || status == "partial" || status == "cancelled" || status == "interrupted"
+}
+
 func (s *Store) Recover(ctx context.Context) error {
 	return retryWrite(ctx, func() error {
-		_, e := s.db.ExecContext(ctx, `UPDATE hub_reports SET status='interrupted',updated_at_ms=?,error_json='{"message":"检测服务已重启，已停止旧任务；已保存结果仍可查看，不会自动重新调用模型","step":"recover","operationResult":"unknown"}' WHERE status IN('queued','running')`, Now().UnixMilli())
-		return e
+		tx, err := s.db.BeginTx(ctx, nil)
+		if err != nil {
+			return err
+		}
+		defer tx.Rollback()
+		_, err = tx.ExecContext(ctx, `UPDATE hub_reports SET status='interrupted',updated_at_ms=?,error_json='{"message":"检测服务已重启，已停止旧任务；已保存结果仍可查看，不会自动重新调用模型","step":"recover","operationResult":"unknown"}' WHERE status IN('queued','running')`, Now().UnixMilli())
+		if err != nil {
+			return err
+		}
+		// Startup calls Recover only after the executor confirmed all old units
+		// exited. No previous report is automatically put back in the FIFO.
+		if _, err = tx.ExecContext(ctx, `UPDATE hub_batches SET first_finished_at_ms=? WHERE `+batchCanFinish, Now().UnixMilli()); err != nil {
+			return err
+		}
+		return tx.Commit()
 	})
 }
 func (s *Store) Active(ctx context.Context) (string, error) {

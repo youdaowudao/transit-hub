@@ -2,6 +2,9 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import Select from './Select';
 import HubSettings from './HubSettings';
+import HubBatchCreate, { batchAccountKey, type BatchModelRead } from './HubBatchCreate';
+import HubBatchView, { retryRound, stopAction, type HubStopIntent } from './HubBatchView';
+import { batchStateLabel, emptyBatchFilter, phaseLabel } from '../lib/hub-batch-view';
 import ReportShare from './ReportShare';
 import ThemeMenu from './ThemeMenu';
 import KnowledgeDates from './KnowledgeDates';
@@ -18,11 +21,15 @@ import Icon from './Icon';
 import { canRetryHubItem, isVerifiedHubReport, newItemRead, readReportItems, reportError, reportVersion, object, type ItemReadState } from '../lib/hub-report-view';
 import { displayTime } from '../lib/hub-crosscheck';
 import { createHubBridge, HubRequestError, type HubBoot } from '../lib/hub-bridge';
-import { catalogAccount, catalogGroup, checkingContext, emptyDraft, missingSelection, modelKey, modelReadReason, pendingWarning, readSections, sectionsStorageKey, selectDraft, storageWarning, upstreamModelIds, verifiedContext, waitingForModels, type DraftAccount } from '../lib/hub-draft';
-import { HUB_KINDS, isHubTerminal, newHubID, reportPollDecision, reportStatus, selectHubDefaultModel, sidebarDayLabel } from '../lib/hub-policy';
-import type { HubCall, HubCatalog, HubContext, HubItem, HubPage, HubReport, HubRuntime, HubSettings as Settings, HubStartApproval, HubTarget, HubTargetInput } from '../lib/hub-types';
+import { catalogAccount, catalogGroup, equivalentCatalog, checkingContext, emptyDraft, missingSelection, modelKey, modelReadReason, pendingWarning, readSections, sectionsStorageKey, selectDraft, storageWarning, upstreamModelIds, verifiedContext, waitingForModels, type DraftAccount } from '../lib/hub-draft';
+import { HUB_KINDS, isHubTerminal, newHubID, reportFinishConfirmed, reportPollDecision, reportStatus, selectHubDefaultModel, sidebarDayLabel } from '../lib/hub-policy';
+import type { HubBatchDetail, HubBatchFilter, HubBatchPage, HubBatchRow, HubCall, HubCallOptions, HubCatalog, HubContext, HubItem, HubPage, HubReport, HubRuntime, HubSettings as Settings, HubStartApproval, HubTarget, HubTargetInput } from '../lib/hub-types';
 
-type View = 'new' | 'report' | 'settings' | 'archive' | 'docs';
+type View = 'new' | 'report' | 'settings' | 'archive' | 'docs' | 'batch';
+type StatusSelection = { op: 'runtime' | 'report' | 'batch' | 'batches' | 'reports'; params: Record<string, unknown> };
+type BatchReturn = { id: string; reportId: string; filter: HubBatchFilter; scroll: number };
+type StateLoop = { key: string; controller: AbortController; timer?: ReturnType<typeof setTimeout>; promise?: Promise<void> };
+const runtimeSelection: StatusSelection = { op: 'runtime', params: {} };
 type Submission = 'report' | 'single';
 type Confirmation = 'lookup' | 'replay';
 type PendingStart = { reportId: string; payload: Record<string, unknown>; accepted?: boolean };
@@ -50,6 +57,24 @@ export default function HubApp({ initialView = 'new' }: { initialView?: View }) 
   const bridge = useRef<ReturnType<typeof createHubBridge> | null>(null);
   const [boot, setBoot] = useState<HubBoot | null>(null), [visible, setVisible] = useState(true), [view, setView] = useState<View>(initialView);
   const scopeRef = useRef<HubBoot | null>(null);
+  const [batchOpened, setBatchOpened] = useState(false);
+  const [mode, setMode] = useState<'single' | 'batch'>('single'), modeRef = useRef<'single' | 'batch'>('single');
+  const batchApprovalEpoch = useRef(0);
+  const batchModelCache = useRef(new Map<string, BatchModelRead>());
+  const [settingsOpen, setSettingsOpen] = useState(initialView === 'settings'), settingsOpenRef = useRef(settingsOpen);
+  const [batch, setBatch] = useState<HubBatchDetail | null>(null), [batchId, setBatchId] = useState(''), [batchFilter, setBatchFilter] = useState<HubBatchFilter>({ ...emptyBatchFilter });
+  const batchNav = useRef<BatchReturn | null>(null);
+  const [batchHistory, setBatchHistory] = useState<HubBatchPage>({items: []}), [archiveBatches, setArchiveBatches] = useState<HubBatchPage>({items: []});
+  const [archiveType, setArchiveType] = useState<'single' | 'batch'>('single');
+  const [batchLookup, setBatchLookup] = useState(''), [batchMessage, setBatchMessage] = useState(''), [statusLoading, setStatusLoading] = useState(false);
+  const [reportTarget, setReportTarget] = useState('');
+  const desiredStatus = useRef<StatusSelection>(runtimeSelection), statusLoop = useRef<StateLoop | null>(null);
+  const [archiveParams, setArchiveParams] = useState<Record<string, unknown>>({scope: 'archive', reportType: 'single', limit: 20});
+  const stopIntentBatch = useRef('');
+  const [stopIntent, setStopIntent] = useState<HubStopIntent | null>(null), stopIntentRef = useRef<HubStopIntent | null>(null), stopTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const [recoverBusy, setRecoverBusy] = useState(false), recoverBusyRef = useRef(false), singleWaiter = useRef('');
+  const serverDelta = useRef(0), lastStatusConfirmed = useRef(0);
+  const setIntent = (intent: HubStopIntent | null) => { stopIntentRef.current = intent; setStopIntent(intent); };
   const [bankStats, setBankStats] = useState<BankStats | null>(null);
   const [mobileOpen, setMobileOpen] = useState(false);
   const [catalog, setCatalog] = useState<HubCatalog | null>(null), catalogRef = useRef<HubCatalog | null>(null);
@@ -63,9 +88,8 @@ export default function HubApp({ initialView = 'new' }: { initialView?: View }) 
   const [sectionWarning, setSectionWarning] = useState('');
   const [history, setHistory] = useState<HubPage<HubReport>>({ items: [] }), [historyError, setHistoryError] = useState('');
   const [report, setReport] = useState<HubReport | null>(null), [active, setActive] = useState<HubReport | null>(null), [reportMessage, setReportMessage] = useState('');
-  const [stopRequested, setStopRequested] = useState('');
   const [retryBusy, setRetryBusy] = useState(false), [retryPending, setRetryPending] = useState<{ reportId: string; retryId: string; expectedRetryId: string; itemIds: string[] } | null>(null);
-  const [items, setItems] = useState<HubItem[]>([]), [itemBusy, setItemBusy] = useState(false), [itemsComplete, setItemsComplete] = useState(false), [itemError, setItemError] = useState(''), [pollEpoch, setPollEpoch] = useState(0);
+  const [items, setItems] = useState<HubItem[]>([]), [itemBusy, setItemBusy] = useState(false), [itemsComplete, setItemsComplete] = useState(false), [itemError, setItemError] = useState('');
   const [itemsReadVersion, setItemsReadVersion] = useState('');
   const runtimeChecks = useRef(0), [runtimeChecking, setRuntimeChecking] = useState(false);
   const itemReader = useRef<{ id: string; request: number; state: ItemReadState; promise?: Promise<void>; version: string } | null>(null);
@@ -77,7 +101,7 @@ export default function HubApp({ initialView = 'new' }: { initialView?: View }) 
   const onDirtyChange = useCallback((value: boolean) => { dirty.current = value; bridge.current?.setDirty(value); }, []);
   const reportRequest = useRef(0);
   const lastReport = useRef<HubReport | null>(null), latestView = useRef(view), visibleRef = useRef(visible), alive = useRef(true), terminalSince = useRef<number | null>(null);
-  const call: HubCall = useCallback(<T,>(op: string, params: Record<string, unknown> = {}, approveStart?: HubStartApproval): Promise<T> => bridge.current ? bridge.current.call<T>(op, params, approveStart) : Promise.reject(new HubRequestError('请从调度站的模型检测按钮打开此页面。')), []);
+  const call: HubCall = useCallback(<T,>(op: string, params: Record<string, unknown> = {}, approveStart?: HubStartApproval, options?: HubCallOptions): Promise<T> => bridge.current ? bridge.current.call<T>(op, params, approveStart, options) : Promise.reject(new HubRequestError('请从调度站的模型检测按钮打开此页面。')), []);
   const storeDraft = (value: typeof emptyDraft) => { draftRef.current = value; setDraft(value); };
   const storePending = (kind: Submission, value?: PendingStart) => { pendingRef.current = { ...pendingRef.current, [kind]: value }; setPending(pendingRef.current); };
   const storeAction = useCallback((kind: Submission, value?: StartAction) => { actionsRef.current = { ...actionsRef.current, [kind]: value }; setActions(actionsRef.current); }, []);
@@ -90,7 +114,8 @@ export default function HubApp({ initialView = 'new' }: { initialView?: View }) 
     return discarded;
   }, [storeAction]);
   const changeView = useCallback((next: View) => {
-    if (next !== 'new') discardChecks();
+    if (next !== 'new') { discardChecks(); batchApprovalEpoch.current++; }
+    if (latestView.current !== next) { statusLoop.current?.controller.abort(); if (statusLoop.current?.timer) clearTimeout(statusLoop.current.timer); statusLoop.current = null; }
     latestView.current = next; setView(next);
   }, [discardChecks]);
   const chooseDraft = (next: HubTargetInput, prefill = false) => {
@@ -111,7 +136,8 @@ export default function HubApp({ initialView = 'new' }: { initialView?: View }) 
   };
   const applyCatalog = (value: HubCatalog | null) => {
     if (value && value.workspaceId !== scopeRef.current?.workspaceId) return;
-    const next = value;
+    const next = equivalentCatalog(catalogRef.current, value) ? catalogRef.current : value;
+    if (catalogRef.current !== next) { batchApprovalEpoch.current++; batchModelCache.current.clear(); }
     catalogRef.current = next; setCatalog(next);
     if (next && awaitingPrefill.current) { chooseDraft(awaitingPrefill.current); return; }
     const previous = draftRef.current;
@@ -129,27 +155,38 @@ export default function HubApp({ initialView = 'new' }: { initialView?: View }) 
     try { localStorage.setItem(sectionsStorageKey(workspace), JSON.stringify(next)); setSectionWarning(''); }
     catch { setSectionWarning(storageWarning); }
   };
-  const loadRuntime = useCallback(async () => {
-    const scope = scopeRef.current, result = await call<HubRuntime>('runtime');
-    if (scopeRef.current === scope && alive.current) { setRuntime(result); setActive(result.active ?? null); }
+  const applyRuntime = useCallback((result: HubRuntime) => {
+    if (typeof result.serverNow === 'number') serverDelta.current = result.serverNow - Date.now();
+    setRuntime(result); setActive(result.active ?? null);
+  }, []);
+  const loadRuntime = useCallback(async (options?: HubCallOptions) => {
+    const scope = scopeRef.current, result = await call<HubRuntime>('runtime', {}, undefined, options);
+    if (scopeRef.current === scope && alive.current && !options?.signal?.aborted) applyRuntime(result);
     return result;
-  }, [call]);
+  }, [call, applyRuntime]);
   const applyReportState = useCallback((value: HubReport, selected: boolean) => {
     if (selected) { setReport(value); lastReport.current = value; }
-    const decision = reportPollDecision(value, terminalSince.current, Date.now());
-    if (isHubTerminal(value.status) || value.processExited) setStopRequested(current => current === value.reportId ? '' : current);
-    else if (value.stopRequested) setStopRequested(value.reportId);
+    const decision = reportPollDecision(value, terminalSince.current, Date.now() + serverDelta.current);
     terminalSince.current = decision.terminalSince;
-    setReportMessage(decision.message);
-    setActive(current => value.status === 'queued' ? current : isHubTerminal(value.status) && value.processExited ? (current?.reportId === value.reportId ? null : current) : value);
+    if (selected) setReportMessage(decision.message);
+    if (reportFinishConfirmed(value)) setActive(current => current?.reportId === value.reportId ? null : current);
+    else if (['preparing','running','stopping','saving_end'].includes(value.executionPhase ?? '') || (!value.executionPhase && value.status === 'running')) setActive(value);
     return decision;
   }, []);
-  const loadHistory = useCallback(async (cursor = '') => {
+  const loadHistory = useCallback(async (cursor = '', batchCursor = '') => {
     const scope = scopeRef.current, current = () => scopeRef.current === scope && alive.current;
     try {
-      const page = await call<HubPage<HubReport>>('reports', { scope: 'sidebar', limit: 20, cursor });
-      if (!current()) return;
-      setHistory(old => ({ ...page, items: cursor ? [...old.items, ...page.items] : page.items })); setHistoryError('');
+      if (!batchCursor) {
+        const page = await call<HubPage<HubReport>>('reports', { scope: 'sidebar', reportType: 'single', limit: 20, cursor });
+        if (!current()) return;
+        setHistory(old => ({ ...page, items: cursor ? [...old.items, ...(page.items ?? [])] : page.items ?? [] }));
+      }
+      if (!cursor) {
+        const page = await call<HubBatchPage>('batches', { scope: 'sidebar', limit: 20, cursor: batchCursor });
+        if (!current()) return;
+        setBatchHistory(old => ({ ...page, items: batchCursor ? [...old.items, ...(page.items ?? [])] : page.items ?? [] }));
+      }
+      if (current()) setHistoryError('');
     } catch (e) { if (current()) setHistoryError(problem(e)); }
   }, [call]);
   const loadItems = useCallback(async (id: string, resume = false, force = false) => {
@@ -161,6 +198,8 @@ export default function HubApp({ initialView = 'new' }: { initialView?: View }) 
       reader = { id, request, state: newItemRead(), version: '' }; itemReader.current = reader;
     }
     const version = reportVersion(lastReport.current!);
+    const signal = statusLoop.current?.controller.signal;
+    const itemCall: HubCall = (op, params, approve, options) => call(op, params, approve, {...options, signal});
     if (reader.promise) { await reader.promise; return; }
     if (!force && !resume && reader.version === version) return;
     if (!resume) reader.state = newItemRead();
@@ -173,7 +212,7 @@ export default function HubApp({ initialView = 'new' }: { initialView?: View }) 
       for (let round = 0; round < 2 && current(); round++) {
         const startedVersion = reportVersion(lastReport.current!);
         try {
-          await readReportItems(call, id, selectedReader.state, current, rows => {
+          await readReportItems(itemCall, id, selectedReader.state, current, rows => {
             if (!current()) return;
             setItems(previous => { const merged = new Map(previous.map(item => [item.itemId, item])); rows.forEach(item => merged.set(item.itemId, item)); return Array.from(merged.values()); });
           });
@@ -205,13 +244,13 @@ export default function HubApp({ initialView = 'new' }: { initialView?: View }) 
   }, [boot, call]);
 
   useEffect(() => {
-    if (!boot || view !== 'archive' || !visible) return;
+    if (!boot || view !== 'archive' || archiveType !== 'single' || !visible) return;
     let live = true;
     void call<{ items: HubTarget[] }>('targets').then(value => {
       if (live && scopeRef.current === boot) setTargets(value.items ?? []);
     }, e => { if (live && scopeRef.current === boot) setError(problem(e)); });
     return () => { live = false; };
-  }, [boot, view, visible, call]);
+  }, [boot, view, archiveType, visible, call]);
 
   // 选中账号后，和分组健康「账号问答」一样实时向该账号的上游读取模型列表（先核对账号，再读模型）。
   // 只读取，不修改主站、不开始检测。重新选择（含 BOOT、重新打开）、换账号、检测页收到名单移除账号后，旧请求不再发出第二步，也不写入结果；
@@ -227,43 +266,207 @@ export default function HubApp({ initialView = 'new' }: { initialView?: View }) 
     const stillCurrent = () => request === modelRequest.current
       && draftRef.current.groupId === groupId && draftRef.current.targetId === targetId;
     setUpstreamModels({ key, status: 'loading', models: [], error: '' });
-    void (async () => {
+    const source = catalogRef.current;
+    const account = catalogAccount(source, groupId, targetId);
+    const cacheKey = batchAccountKey(targetId, groupId);
+    const cached: BatchModelRead | undefined = source ? {catalog: source, protocol: account?.protocol, models: [], status: 'loading'} : undefined;
+    if (cached) batchModelCache.current.set(cacheKey, cached);
+    const cacheCurrent = () => cached && catalogRef.current === source && batchModelCache.current.get(cacheKey) === cached;
+    const read = (async () => {
       let step = '核对账号';
       try {
         const value = await call<HubContext>('context', { targetId, groupId });
         if (!stillCurrent()) return;
-        const expectedContext = verifiedContext(value, boot.workspaceId, { groupId, targetId });
+        const expectedContext = verifiedContext(value, boot.workspaceId, { groupId, targetId }); if (cached && cacheCurrent()) cached.context = expectedContext;
         step = '读取上游模型';
         const list = await call<{ models?: unknown }>('models', { targetId, groupId, expectedContext });
         if (!stillCurrent()) return;
         const ids = upstreamModelIds(list);
+        if (cached && cacheCurrent()) { cached.models = ids; cached.status = 'done'; }
         setUpstreamModels({ key, status: 'done', models: ids, error: '' });
         if (!ids.length) return;
         // 和 V3.1.29 一样优先用本次核对返回的分组名判断默认模型（分组刚改名、名单还没更新时也按新名）；页面上的分组和账号仍按名单显示。
         const selection = selectHubDefaultModel(ids, value.groupName || catalogGroup(catalogRef.current, groupId)?.name || '');
         storeDraft({ ...draftRef.current, model: selection.model, modelNotice: selection.notice });
       } catch (e) {
+        if (stillCurrent() && cached && cacheCurrent()) { cached.status = 'failed'; cached.reason = problem(e); }
         if (stillCurrent()) setUpstreamModels({ key, status: 'failed', models: [], error: `${step}时${modelReadReason(e instanceof HubRequestError ? problem(e) : e instanceof Error ? e.message : '', e instanceof HubRequestError ? e.status : 0)}` });
-      }
+      } finally { if (cached && cacheCurrent()) { cached.promise = undefined; if (cached.status === 'loading') batchModelCache.current.delete(cacheKey); } }
     })();
+    if (cached) cached.promise = read;
     // 不需要清理函数：effect 每次重新执行都会先让请求编号加一。
   }, [boot, draft.groupId, draft.targetId, draftAccountReady, modelReload, call]);
 
-  const openReport = useCallback(async (id: string, known?: HubReport) => {
+  const releaseStop = () => { if (stopTimer.current) { clearTimeout(stopTimer.current); stopTimer.current = null; } setIntent(null); };
+  const stopUnknown = '停止结果尚未确认：确认时间已过，检测可能仍在继续。自动核查已暂停，请检查运行环境后核查原报告；本次不会新建、补测或重复发送停止。';
+  const observeStop = (row: {reportId: string; phase?: string; executionPhase?: string; retryId?: string; retry?: {id:string}; finishConfirmed?: boolean; stopConfirmDeadlineMs?: number}) => {
+    const intent = stopIntentRef.current;
+    if (!intent || intent.reportId !== row.reportId) return;
+    if (intent.expectedRetryId !== retryRound(row)) { releaseStop(); return; }
+    const phase = row.executionPhase ?? row.phase;
+    if (phase === 'ended' && row.finishConfirmed === true || phase === 'saving_end' || phase === 'saving_cancel' || phase === 'paused') { releaseStop(); return; }
+    if (intent.ack !== 'pending' && row.stopConfirmDeadlineMs && row.stopConfirmDeadlineMs - serverDelta.current < intent.confirmationDeadlineMs) {
+      const deadline = row.stopConfirmDeadlineMs - serverDelta.current;
+      setIntent({ ...intent, confirmationDeadlineMs: deadline });
+    }
+  };
+  const observeRuntime = (value: HubRuntime, projectSelected = false) => {
+    const row = value.active;
+    if (!row) return;
+    observeStop(row);
+    const selected = lastReport.current;
+    // A report response already reconciles both snapshots. Its nested runtime is
+    // the read-after view for the top line, not authority to promote that report
+    // to a healthier phase. A priority runtime-only read can enrich a same-round
+    // report but cannot turn an unresolved report into a healthy one.
+    if (projectSelected && selected?.reportId === row.reportId && retryRound(selected) === retryRound(row) && !(selected.executionPhase === 'unknown' && ['queued','preparing','running'].includes(row.executionPhase ?? ''))) {
+      const next = {...selected, executionPhase: row.executionPhase, finishConfirmed: row.finishConfirmed, processExited: row.processExited, recoveryDeadlineMs: row.recoveryDeadlineMs, recoveryReason: row.recoveryReason, stopConfirmDeadlineMs: row.stopConfirmDeadlineMs, stopCallPending: row.stopCallPending, executionConfirmDeadlineMs: row.executionConfirmDeadlineMs};
+      if (row.executionPhase) applyReportState(next, true);
+    }
+  };
+  const beginStatus = useCallback((selection: StatusSelection, force = false, known?: HubReport | HubBatchDetail, runtimeFirst = false): Promise<void> => {
+    const scope = scopeRef.current, key = JSON.stringify(selection);
+    if (!scope || !visibleRef.current || !alive.current) return Promise.resolve();
+    if (!force && statusLoop.current?.key === key) return statusLoop.current.promise ?? Promise.resolve();
+    if (statusLoop.current?.timer) clearTimeout(statusLoop.current.timer);
+    statusLoop.current?.controller.abort();
+    const loop: StateLoop = {key, controller: new AbortController()}; statusLoop.current = loop;
+    const current = () => statusLoop.current === loop && scopeRef.current === scope && alive.current && visibleRef.current && !loop.controller.signal.aborted;
+    let failures = 0, busyDeadline = 0, readRuntimeFirst = runtimeFirst, readSelection = selection, forceItems = force;
+    let initial = known, manualFirst = runtimeFirst;
+    const waitRead = '正在读取或保存其他检测状态，稍后自动核查；此时不会重发检测题目。超过等待时间仍无法确认时，请按提示检查。';
+    const setMessage = (message: string) => { if (selection.op === 'batch' || selection.op === 'batches') setBatchMessage(message); else setReportMessage(message); };
+    const failureMessage = (e: unknown) => `读取最新状态未完成：${problem(e)}。${lastStatusConfirmed.current ? `以下保留${displayTime(lastStatusConfirmed.current, true)}最后确认的结果，` : ''}请重试读取；这不表示检测已失败。`;
+    const fixedBusy = (deadline?: unknown) => {
+      const fallback = Date.now() + 40000;
+      const known = typeof deadline === 'number' && deadline > 0 ? deadline - serverDelta.current : fallback;
+      busyDeadline = Math.min(busyDeadline || fallback, known);
+    };
+    const stopExpired = () => {
+      const intent = stopIntentRef.current;
+      const inSelection = intent && (selection.op === 'report' && selection.params.reportId === intent.reportId || selection.op === 'batch' && stopIntentBatch.current === selection.params.batchId);
+      if (!intent || !inSelection || Date.now() < intent.confirmationDeadlineMs) return false;
+      if (intent.ack === 'accepted') setIntent({...intent, ack: 'unknown'});
+      setMessage(stopUnknown); setError(stopUnknown); return true;
+    };
+    const schedule = () => { if (current()) loop.timer = setTimeout(() => { if (current()) loop.promise = poll(); }, 2000); };
+    const poll = async () => {
+      if (!current()) return;
+      if (readSelection.op === 'report' && singleWaiter.current === readSelection.params.reportId) { schedule(); return; }
+      const id = readSelection.params.reportId as string | undefined;
+      const reportSaving = id && ['saving_end','saving_cancel','paused','unknown','stopping'].includes(lastReport.current?.executionPhase ?? '');
+      const priorityEligible = ['report','batch','runtime'].includes(readSelection.op);
+      const afterStop = priorityEligible && Boolean(stopIntentRef.current || reportSaving || busyDeadline > 0);
+      const options: HubCallOptions = { signal: loop.controller.signal, afterStop };
+      setStatusLoading(true);
+      try {
+        if ((afterStop || readRuntimeFirst) && readSelection.op !== 'runtime') {
+          const observed = await loadRuntime({ ...options, afterStop: afterStop || busyDeadline > 0 });
+          if (!current()) return;
+          observeRuntime(observed, readSelection.op === 'report');
+          if (observed.queryState === 'retained') { setMessage(observed.reason || '查询程序退出状态无法确认，请核查运行环境。'); setError(observed.reason || '环境已暂停，请检查本实例systemd与原进程。'); return; }
+          if (!manualFirst && stopExpired()) return;
+          if (observed.queryState === 'busy') {
+            fixedBusy(observed.recoveryDeadlineMs);
+            if (Date.now() >= busyDeadline) { setMessage(`状态待确认：${observed.reason || '等待时间已到'}。请检查运行环境后重试读取。`); return; }
+            if (stopExpired()) return; manualFirst = false; setMessage(waitRead); readRuntimeFirst = true; schedule(); return;
+          }
+        }
+        if (!manualFirst && stopExpired()) return;
+        manualFirst = false;
+        if (readSelection.op === 'runtime') {
+          const result = await loadRuntime(options); if (!current()) return; observeRuntime(result);
+          if (result.queryState === 'retained') { setError(result.reason || '无法确认查询程序退出，请检查运行环境。'); return; }
+          if (result.queryState === 'busy') { fixedBusy(result.recoveryDeadlineMs); if (Date.now() >= busyDeadline) { setError(`状态待确认：${result.reason || '等待时间已到'}。请检查运行环境后重试读取。`); return; } }
+          else busyDeadline = 0;
+        } else if (readSelection.op === 'report') {
+          const value = initial as HubReport | undefined ?? await call<HubReport>('report', readSelection.params, undefined, options); initial = undefined;
+          if (!current()) return;
+          acceptedReport(value, String(id), scope); observeStop(value);
+          const decision = applyReportState(value, true);
+          if (value.runtime) { applyRuntime(value.runtime); observeRuntime(value.runtime); }
+          lastStatusConfirmed.current = Date.now();
+          if (stopExpired()) return;
+          if (!stopIntentRef.current && (forceItems || !['saving_end','saving_cancel','paused','unknown','stopping'].includes(value.executionPhase ?? ''))) { await loadItems(value.reportId, false, forceItems); forceItems = false; }
+          if (!current()) return;
+          if (!decision.poll) {
+            if (!reportFinishConfirmed(value)) { if (!value.runtime && value.executionPhase) { const observed = await loadRuntime({ ...options, afterStop: true }); if (current()) observeRuntime(observed); } return; }
+            void loadHistory(); readSelection = runtimeSelection;
+          }
+        } else if (readSelection.op === 'batch') {
+          const value = initial as HubBatchDetail | undefined ?? await call<HubBatchDetail>('batch', readSelection.params, undefined, options); initial = undefined;
+          if (!current()) return;
+          if (value.batchId !== readSelection.params.batchId) throw new Error('批次编号不一致，请按原编号查询。');
+          if (value.runtime) { applyRuntime(value.runtime); observeRuntime(value.runtime); }
+          // The visible page is filtered; the stop target may only remain in the
+          // always-present all-member projection. Row data adds its deadline.
+          value.memberStates?.forEach(observeStop);
+          value.items?.forEach(observeStop);
+          setBatch(value); lastStatusConfirmed.current = Date.now(); if (stopExpired()) return; setBatchHistory(old => ({...old, items: old.items.map(row => row.batchId === value.batchId ? {...row, counts: value.counts, state: value.state} : row)}));
+          if (value.state === 'unknown' || value.state === 'paused') { setBatchMessage(value.runtime?.reason || '状态尚未确认，请核查运行状态。'); return; }
+          if (value.state === 'ended') { void loadHistory(); readSelection = runtimeSelection; }
+        } else if (readSelection.op === 'batches') {
+          const page = await call<HubBatchPage>('batches', readSelection.params, undefined, options);
+          if (!current()) return; if (page.runtime) applyRuntime(page.runtime);
+          setArchiveBatches({...page, items: page.items ?? []});
+        } else {
+          const page = await call<HubPage<HubReport>>('reports', readSelection.params, undefined, options);
+          if (!current()) return; setArchive({...page, items: page.items ?? []}); readSelection = runtimeSelection;
+        }
+        if (!current()) return;
+        failures = 0; busyDeadline = 0; readRuntimeFirst = false; lastStatusConfirmed.current = Date.now();
+        setError(old => old.startsWith('读取最新状态未完成：') ? '' : old);
+        if (selection.op === 'batch' || selection.op === 'batches') setBatchMessage('');
+        schedule();
+      } catch (e) {
+        if (!current()) return;
+        if (stopExpired()) return;
+        if (e instanceof HubRequestError && e.details.queryState === 'retained') { setMessage(failureMessage(e)); setError(problem(e)); return; }
+        if (e instanceof HubRequestError && e.details.queryState === 'busy' && (afterStop || e.status === 429)) {
+          fixedBusy(e.details.recoveryDeadlineMs); readRuntimeFirst = true;
+          if (Date.now() >= busyDeadline) { setMessage(failureMessage(e)); setError(problem(e)); return; }
+          setMessage(waitRead); schedule(); return;
+        }
+        const message = failureMessage(e); setMessage(message); setError(message);
+        if (++failures < 3) schedule(); else setMessage(`${message} 连续三次无法读取运行状态，已停止自动读取；请点击核查运行状态，不会自动重复检测。`);
+      } finally { if (current()) setStatusLoading(false); }
+    };
+    loop.promise = poll(); return loop.promise;
+  }, [call, loadRuntime, loadItems, loadHistory, applyRuntime, applyReportState]);
+  const openReport = useCallback(async (id: string, known?: HubReport, fromBatch?: BatchReturn) => {
+    if (!/^[0-9a-f]{32}$/.test(id)) { setError('请输入完整32位报告编号后查看已保存结果。'); return; }
+    if (settingsOpenRef.current) { if (dirty.current && !confirm('检测设置有未保存的修改，确定关闭并放弃吗？')) return; settingsOpenRef.current = false; setSettingsOpen(false); }
     const same = lastReport.current?.reportId === id;
-    const request = ++reportRequest.current; itemReader.current = null; setItemBusy(false); setItemError(''); setReportLookup(id);
-    if (!same) { setRetryPending(null); setReport(null); lastReport.current = null; setItemsComplete(false); setItemsReadVersion(''); setItems([]); setStopRequested(''); terminalSince.current = null; }
-    setError(''); if (!same) setReportMessage(''); changeView('report');
-    try { const result = known ?? await call<HubReport>('report', { reportId: id }); if (request !== reportRequest.current) return; applyReportState(result, true); await loadItems(id); }
-    catch (e) { if (request === reportRequest.current) { setError(`读取最新报告未完成：${problem(e)}${same ? '。已显示的回答仍可查看，请点击核查运行状态；不会重新检测。' : `。请按报告编号 ${id} 重试读取，不要重复新建。`}`); } }
-    finally { if (same && request === reportRequest.current) setPollEpoch(n => n + 1); }
-  }, [call, loadItems, applyReportState, changeView]);
+    if (fromBatch?.reportId === id) batchNav.current = fromBatch;
+    else if (batchNav.current?.reportId !== id) batchNav.current = null;
+    reportRequest.current++; itemReader.current = null; setItemBusy(false); setItemError(''); setReportLookup('');
+    if (!same) { setRetryPending(null); setReport(null); lastReport.current = null; setItemsComplete(false); setItemsReadVersion(''); setItems([]); terminalSince.current = null; }
+    setReportTarget(id); setError(''); if (!same) setReportMessage(''); changeView('report');
+    const selection: StatusSelection = { op: 'report', params: { reportId: id } }; desiredStatus.current = selection;
+    return beginStatus(selection, true, known);
+  }, [beginStatus, changeView]);
+  const openBatch = useCallback((id: string, known?: HubBatchDetail, filter: HubBatchFilter = {...emptyBatchFilter}) => {
+    if (!/^[0-9a-f]{32}$/.test(id)) { setError('请输入完整32位批次编号后查看已保存任务。'); return; }
+    if (settingsOpenRef.current) { if (dirty.current && !confirm('检测设置有未保存的修改，确定关闭并放弃吗？')) return; settingsOpenRef.current = false; setSettingsOpen(false); }
+    reportRequest.current++; itemReader.current = null;
+    setBatch(old => old?.batchId === id ? old : null); setBatchId(id); setBatchFilter(filter); setBatchMessage(''); setError(''); changeView('batch');
+    const selection: StatusSelection = { op: 'batch', params: { batchId: id, ...filter, limit: 20 } }; desiredStatus.current = selection;
+    void beginStatus(selection, true, known);
+  }, [beginStatus, changeView]);
+  const changeBatchFilter = (filter: HubBatchFilter) => { setBatchFilter(filter); setBatchMessage(''); setError(''); const selection: StatusSelection = { op: 'batch', params: { batchId, ...filter, limit: 20 }}; desiredStatus.current = selection; void beginStatus(selection, true); };
+  const openBatchReport = (id: string) => { void openReport(id, undefined, {id: batchId, reportId: id, filter: batchFilter, scroll: window.scrollY}); };
+  const returnBatch = () => {
+    if (!report?.batchId) return;
+    const nav = batchNav.current; batchNav.current = null;
+    if (nav?.reportId === report.reportId && nav.id === report.batchId) { openBatch(nav.id, undefined, nav.filter); requestAnimationFrame(() => window.scrollTo(0, nav.scroll)); }
+    else openBatch(report.batchId);
+  };
 
   useEffect(() => {
     alive.current = true;
     const receiveVisibility = (next: boolean) => {
       visibleRef.current = next; setVisible(next);
-      if (!next) discardChecks();
+      if (!next) { discardChecks(); batchApprovalEpoch.current++; statusLoop.current?.controller.abort(); if (statusLoop.current?.timer) clearTimeout(statusLoop.current.timer); statusLoop.current = null; }
     };
     const instance = createHubBridge(value => {
       const previous = scopeRef.current;
@@ -275,9 +478,11 @@ export default function HubApp({ initialView = 'new' }: { initialView?: View }) 
       }
       reportRequest.current++; lastReport.current = null; itemReader.current = null; terminalSince.current = null;
       setReport(null); setItems([]); setItemBusy(false); setItemsComplete(false); setItemsReadVersion(''); setItemError(''); setReportMessage('');
+      statusLoop.current?.controller.abort(); if (statusLoop.current?.timer) clearTimeout(statusLoop.current.timer); statusLoop.current = null; releaseStop();
+      batchApprovalEpoch.current++; batchModelCache.current.clear(); modeRef.current = 'single'; setMode('single'); setBatchOpened(false); setBatch(null); setBatchId(''); setBatchFilter({...emptyBatchFilter}); batchNav.current = null; setBatchHistory({items: []}); setArchiveBatches({items: []}); setBatchMessage(''); setReportTarget(''); setBatchLookup(''); setSettingsOpen(initialView === 'settings'); settingsOpenRef.current = initialView === 'settings';
       setRuntime(null); setActive(null); setArchive({ items: [] }); setTargets([]); setArchiveTarget(''); setReportLookup('');
       setSettings(null); setBankStats(null); setHistory({ items: [] }); setHistoryError('');
-      setRetryBusy(false); setRetryPending(null); setStopRequested(''); setBusy(false);
+      setRetryBusy(false); setRetryPending(null); setBusy(false);
       actionsRef.current = {}; setActions(actionsRef.current); pendingRef.current = {}; setPending(pendingRef.current);
       if (previous) changeView(initialView);
       setError('');
@@ -286,9 +491,11 @@ export default function HubApp({ initialView = 'new' }: { initialView?: View }) 
       chooseDraft(value.target ?? {}, true);
     }, value => {
       if (dirty.current && !confirm('检测设置有未保存的修改，确定切换到新账号并放弃吗？')) return;
+      settingsOpenRef.current = false; setSettingsOpen(false); batchApprovalEpoch.current++; modeRef.current = 'single'; setMode('single');
       if (value.reportId && /^[0-9a-f]{32}$/.test(value.reportId)) { void openReport(value.reportId); return; }
       chooseDraft(value, true); changeView('new'); setError('');
     }, receiveVisibility, warning => setError(readableReportError(warning)), applyCatalog, nextTarget => {
+      batchApprovalEpoch.current++;
       if (!nextTarget || nextTarget.reportId) discardChecks();
       else discardChecks(target => target.groupId === nextTarget.groupId && target.targetId === nextTarget.targetId);
     });
@@ -296,41 +503,15 @@ export default function HubApp({ initialView = 'new' }: { initialView?: View }) 
     const standalone = setTimeout(() => {
       if (!scopeRef.current) setError(old => old || '请从调度站中的“模型检测”按钮打开此页面。页面本身不会启动检测。');
     }, 10000);
-    return () => { alive.current = false; reportRequest.current++; clearTimeout(standalone); instance.dispose(); bridge.current = null; scopeRef.current = null; };
+    return () => { alive.current = false; reportRequest.current++; clearTimeout(standalone); statusLoop.current?.controller.abort(); if (statusLoop.current?.timer) clearTimeout(statusLoop.current.timer); statusLoop.current = null; if (stopTimer.current) clearTimeout(stopTimer.current); instance.dispose(); bridge.current = null; scopeRef.current = null; };
   }, [changeView, discardChecks, initialView, openReport]);
 
   useEffect(()=>{if(boot?.target.reportId && /^[0-9a-f]{32}$/.test(boot.target.reportId)) void openReport(boot.target.reportId);},[boot,openReport]);
-  useEffect(() => {
-    if (!boot || !visible) return;
-    void loadHistory();
-    void loadRuntime().catch(e => { if (scopeRef.current === boot) setError(problem(e)); });
-  }, [visible, boot, loadHistory, loadRuntime]);
-
-  const pollId = view === 'report' ? report?.reportId : active?.reportId;
-  useEffect(() => {
-    if (!boot || !visible || !pollId) return;
-    let live = true, timer: ReturnType<typeof setTimeout> | undefined, failures = 0;
-    terminalSince.current = null;
-    const poll = async () => {
-      const request = reportRequest.current;
-      try {
-        const value = await call<HubReport>('report', { reportId: pollId }); if (!live || request !== reportRequest.current) return;
-        failures = 0;
-        const selected = lastReport.current?.reportId === pollId;
-        const decision = applyReportState(value, selected);
-        if (selected && latestView.current === 'report') await loadItems(pollId);
-        if (!live || request !== reportRequest.current) return;
-        if (decision.poll) timer = setTimeout(() => { void poll(); }, 2000);
-        else { if (isHubTerminal(value.status) && value.processExited) void loadHistory(); }
-      } catch (e) {
-        if (!live || request !== reportRequest.current) return;
-        if (++failures < 3) timer = setTimeout(() => { void poll(); }, 2000);
-        else { setError(problem(e)); setReportMessage('状态读取失败，上次显示不代表仍在执行。连续三次无法读取运行状态，已停止自动读取；请点击核查运行状态，不会自动重复检测。'); }
-      }
-    };
-    void poll();
-    return () => { live = false; if (timer) clearTimeout(timer); };
-  }, [boot, visible, pollId, pollEpoch, call, loadItems, loadHistory, applyReportState]);
+  useEffect(() => { if (boot && visible) void loadHistory(); }, [boot, visible, loadHistory]);
+  const selection: StatusSelection = view === 'report' && reportTarget ? {op: 'report', params: {reportId: reportTarget}} : view === 'batch' && batchId ? {op: 'batch', params: {batchId, ...batchFilter, limit: 20}} : view === 'archive' ? {op: archiveType === 'batch' ? 'batches' : 'reports', params: archiveParams} : runtimeSelection;
+  const selectionKey = JSON.stringify(selection);
+  desiredStatus.current = selection;
+  useEffect(() => { if (boot && visible) void beginStatus(selection); }, [boot, visible, selectionKey, beginStatus]);
 
   const lockStart = (kind: Submission, target?: DraftAccount) => {
     const scope = scopeRef.current;
@@ -347,26 +528,58 @@ export default function HubApp({ initialView = 'new' }: { initialView?: View }) 
 
   const waitForSingle = async (action: StartAction, request: PendingStart, signal?: AbortSignal, known?: HubReport): Promise<Metrics | null> => {
     const current = () => currentPending('single', action, request) && !signal?.aborted;
-    let knownReport = known;
-    while (current()) {
-      if (!visibleRef.current) { await new Promise(resolve => setTimeout(resolve, 800)); continue; }
-      const row = knownReport ?? acceptedReport(await call<HubReport>('report', { reportId: request.reportId }), request.reportId, action.scope);
-      knownReport = undefined;
-      if (!current()) return null;
-      applyReportState(row, false);
-      if (isHubTerminal(row.status)) {
-        const page = await call<HubPage<HubItem>>('items', { reportId: request.reportId, limit: 5 });
-        if (!current()) return null;
-        const item = page.items?.[0], metrics = object(object(item?.result?.evidence).single_ask);
-        if (item?.result?.error || metrics.Err || ['cancelled', 'interrupted'].includes(row.status) || !Object.keys(metrics).length) {
-          throw new Error(`${item?.result?.error || metrics.Err || '问答已停止或未完整返回'}。记录 ${request.reportId} 已保留，可以打开原问答记录补测失败项。`);
+    let knownReport = known, busyDeadline = 0, preferRuntime = false, failures = 0;
+    const paused = (reason: string) => new Error(`问答记录${request.reportId}已受理，但${reason}，本次等待已结束。请核查原记录；不会自动重复提问或补测。`);
+    const wait = () => new Promise(resolve => setTimeout(resolve, 800));
+    const fixedBusy = (deadline?: unknown) => { const fallback = Date.now() + 40000; busyDeadline = Math.min(busyDeadline || fallback, typeof deadline === 'number' && deadline > 0 ? deadline - serverDelta.current : fallback); };
+    singleWaiter.current = request.reportId;
+    try {
+      while (current()) {
+        if (!visibleRef.current) { await wait(); continue; }
+        try {
+          if (preferRuntime || stopIntentRef.current?.reportId === request.reportId) {
+            const observed = await loadRuntime({afterStop: true, signal}); if (!current()) return null;
+            observeRuntime(observed, latestView.current === 'report' && desiredStatus.current.params.reportId === request.reportId && observed.active?.reportId === request.reportId);
+            if (observed.queryState === 'retained') throw paused(observed.reason || '查询程序是否结束尚未确认');
+            if (observed.active?.reportId === request.reportId) {
+              const decision = reportPollDecision(observed.active, null, Date.now() + serverDelta.current);
+              if (!decision.poll && !reportFinishConfirmed(observed.active)) throw paused(decision.message);
+            }
+            if (observed.queryState === 'busy') { fixedBusy(observed.recoveryDeadlineMs); if (Date.now() >= busyDeadline) throw paused(observed.reason || '读取状态等待时间已到'); await wait(); continue; }
+          }
+          const row = knownReport ?? acceptedReport(await call<HubReport>('report', { reportId: request.reportId }, undefined, {afterStop: preferRuntime, signal}), request.reportId, action.scope);
+          knownReport = undefined;
+          if (!current()) return null;
+          observeStop(row); const selected = latestView.current === 'report' && desiredStatus.current.params.reportId === row.reportId;
+          const decision = applyReportState(row, selected);
+          if (row.runtime) { applyRuntime(row.runtime); observeRuntime(row.runtime); }
+          if (reportFinishConfirmed(row)) {
+            const page = await call<HubPage<HubItem>>('items', { reportId: request.reportId, limit: 5 }, undefined, {signal});
+            if (!current()) return null;
+            const item = page.items?.[0], metrics = object(object(item?.result?.evidence).single_ask);
+            if (item?.result?.error || metrics.Err || ['cancelled', 'interrupted'].includes(row.status) || !Object.keys(metrics).length) throw paused(String(item?.result?.error || metrics.Err || '问答已停止或未完整返回'));
+            storePending('single'); void loadHistory(); return metrics as Metrics;
+          }
+          if (!decision.poll) throw paused(decision.message || row.recoveryReason || '执行状态待确认');
+          if (stopIntentRef.current?.reportId === row.reportId && Date.now() >= stopIntentRef.current.confirmationDeadlineMs) throw paused(stopUnknown);
+          preferRuntime = ['saving_end','saving_cancel'].includes(row.executionPhase ?? ''); busyDeadline = 0; failures = 0;
+        } catch (e) {
+          if (!current()) return null;
+          if (e instanceof HubRequestError && e.details.queryState === 'busy') {
+            fixedBusy(e.details.recoveryDeadlineMs); preferRuntime = true;
+            if (Date.now() >= busyDeadline) throw paused(problem(e));
+          } else if (e instanceof HubRequestError && e.details.queryState === 'retained') throw paused(problem(e));
+          else if (!(e instanceof HubRequestError) || ++failures >= 3) throw e;
         }
-        storePending('single'); void loadHistory();
-        return metrics as Metrics;
+        await wait();
       }
-      await new Promise(resolve => setTimeout(resolve, 800));
+      return null;
+    } finally {
+      if (singleWaiter.current === request.reportId) {
+        singleWaiter.current = '';
+        if (latestView.current === 'report' && desiredStatus.current.params.reportId === request.reportId && scopeRef.current === action.scope) void beginStatus(desiredStatus.current, true);
+      }
     }
-    return null;
   };
 
   const resolveSubmission = async (kind: Submission, action: StartAction, request: PendingStart, method: 'first' | Confirmation, signal?: AbortSignal, submittedDraft?: typeof emptyDraft): Promise<Metrics | null> => {
@@ -391,7 +604,7 @@ export default function HubApp({ initialView = 'new' }: { initialView?: View }) 
         storePending(kind);
         const sameDraft = latestView.current === 'new' && visibleRef.current && draftRef.current === submittedDraft;
         if (method !== 'first' || sameDraft) void openReport(request.reportId, method === 'lookup' ? row : undefined);
-        else { void loadHistory(); void loadRuntime().catch(() => undefined); }
+        else { void loadHistory(); }
         return null;
       }
       request.accepted = true; storePending(kind, request); void loadHistory();
@@ -475,40 +688,58 @@ export default function HubApp({ initialView = 'new' }: { initialView?: View }) 
     return submitDraft('single', { singleAsk: input }, signal);
   };
 
-  const stop = async () => {
-    if (!report) return;
-    const id = report.reportId; setBusy(true); setStopRequested(id); setError('');
+  const stop = async (target?: HubBatchRow) => {
+    const row: HubBatchRow | undefined = target ?? (report ? {...report, phase: report.executionPhase ?? (report.status === 'queued' ? 'queued' : reportFinishConfirmed(report) ? 'ended' : 'running')} : undefined);
+    if (!row || stopIntentRef.current && (stopIntentRef.current.ack === 'pending' || Date.now() < stopIntentRef.current.confirmationDeadlineMs && stopIntentRef.current.reportId !== row.reportId)) return;
+    const possible = stopAction(row, Date.now() + serverDelta.current, stopIntentRef.current);
+    if (!possible || possible.disabled) return;
+    const scope = scopeRef.current, id = row.reportId, expectedRetryId = retryRound(row), intent: HubStopIntent = {reportId: id, expectedRetryId, ack: 'pending', confirmationDeadlineMs: Date.now() + 15000};
+    stopIntentBatch.current = target ? batchId : report?.batchId ?? ''; setIntent(intent); setBusy(true); setError('');
+    reportRequest.current++; itemReader.current = null; setItemBusy(false); setItemsReadVersion('');
+    if (stopTimer.current) clearTimeout(stopTimer.current);
+    stopTimer.current = setTimeout(() => {
+      const current = stopIntentRef.current;
+      if (scopeRef.current !== scope || current?.reportId !== id || current.expectedRetryId !== expectedRetryId) return;
+      // Preserve pending until the actual POST returns; a timeout cannot permit another Stop call.
+      const selected = desiredStatus.current;
+      if (selected.op === 'report' && selected.params.reportId === id || selected.op === 'batch' && selected.params.batchId === stopIntentBatch.current) { setError(stopUnknown); if (selected.op === 'report') setReportMessage(stopUnknown); else setBatchMessage(stopUnknown); statusLoop.current?.controller.abort(); if (statusLoop.current?.timer) clearTimeout(statusLoop.current.timer); statusLoop.current = null; setStatusLoading(false); }
+    }, 15000);
+    const same = () => scopeRef.current === scope && stopIntentRef.current?.reportId === id && stopIntentRef.current?.expectedRetryId === expectedRetryId;
+    const control = call<HubReport>('cancel', { reportId: id, expectedRetryId });
+    // Priority status can run while the independent cancel POST remains in flight.
+    void beginStatus(desiredStatus.current, true);
     try {
-      const result = await call<HubReport>('cancel', { reportId: id, expectedRetryId: report.retry?.id ?? '' });
-      if (lastReport.current?.reportId !== id) return;
-      if (isHubTerminal(result.status) && result.accountName) applyReportState(result, true);
-      await openReport(id);
-    } catch (e) { if (lastReport.current?.reportId === id) { setStopRequested(''); setError(`停止结果尚未确认：${problem(e)}。已显示的回答仍可查看，请核查运行状态。`); } }
-    finally { setBusy(false); }
+      const result = await control;
+      if (!same()) return;
+      const current = stopIntentRef.current!;
+      setIntent({...current, ack: Date.now() >= current.confirmationDeadlineMs ? 'unknown' : 'accepted'});
+      if (result.reportId === id && (result.executionPhase || result.accountName)) {
+        observeStop(result);
+        if (lastReport.current?.reportId === id && retryRound(lastReport.current) === expectedRetryId && result.accountName) applyReportState(result, true);
+      }
+    } catch (e) {
+      if (!same()) return;
+      if (e instanceof HubRequestError && e.status === 409) { releaseStop(); setError(`停止未受理：${problem(e)}。请核查当前报告轮次，未停止其他任务。`); }
+      else { setIntent({...stopIntentRef.current!, ack: 'unknown'}); setError(`停止结果尚未确认：${problem(e)}。已显示的回答仍可查看，请核查运行状态。`); }
+    } finally { if (scopeRef.current === scope) setBusy(false); }
   };
   const checkRuntime = async () => {
-    runtimeChecks.current++;
-    setRuntimeChecking(true);
-    try {
-      const request = ++reportRequest.current, id = lastReport.current?.reportId;
-      setError(''); setItemBusy(false);
-      try {
-        await loadRuntime();
-        if (request !== reportRequest.current || !id) return;
-        const value = await call<HubReport>('report', { reportId: id });
-        if (request !== reportRequest.current) return;
-        const decision = applyReportState(value, true);
-        await loadItems(id, false, true);
-        if (decision.poll) setPollEpoch(n => n + 1);
-      } catch (e) { if (request === reportRequest.current) setError(problem(e)); }
-    } finally {
-      if (--runtimeChecks.current === 0) setRuntimeChecking(false);
-    }
+    runtimeChecks.current++; setRuntimeChecking(true); setError('');
+    // Explicit refresh restarts the same controller, never calls openReport twice.
+    reportRequest.current++; itemReader.current = null; setItemBusy(false); setItemsReadVersion('');
+    try { await beginStatus(desiredStatus.current, true, undefined, true); } finally { if (--runtimeChecks.current === 0) setRuntimeChecking(false); }
+  };
+  const recoverRuntime = async () => {
+    if (recoverBusyRef.current || runtime?.recoverable !== true) return;
+    const scope = scopeRef.current; recoverBusyRef.current = true; setRecoverBusy(true);
+    try { await call('recover-runtime'); if (scopeRef.current === scope) { setError(''); void beginStatus(desiredStatus.current, true); } }
+    catch (e) { if (scopeRef.current === scope) setError(`核查并重试保存未完成：${problem(e)}。已保存回答保留，不会重新发送检测题目。`); }
+    finally { if (scopeRef.current === scope) { recoverBusyRef.current = false; setRecoverBusy(false); } }
   };
   const retryItems = async (ids: string[]) => {
     if (!report || retryBusy) return;
     const confirming = retryPending?.reportId === report.reportId;
-    if (!confirming && (!itemsComplete || !isHubTerminal(report.status) || report.processExited !== true)) return;
+    if (!confirming && (!itemsComplete || !reportFinishConfirmed(report) || report.batchId && !report.batchFirstFinishedAtMs)) return;
     const id = report.reportId;
     const payload = retryPending?.reportId === id ? retryPending : { reportId: id, retryId: newHubID(), expectedRetryId: report.retry?.id ?? '', itemIds: ids };
     setRetryPending(payload); setRetryBusy(true); setError('');
@@ -526,15 +757,24 @@ export default function HubApp({ initialView = 'new' }: { initialView?: View }) 
       }
     } finally { if (alive.current) setRetryBusy(false); }
   };
-  const findArchive = async (cursor = '') => {
-    const scope = scopeRef.current;
-    setError('');
-    try {
-      const page = await call<HubPage<HubReport>>('reports', { scope: 'archive', from, to, targetId: archiveTarget, cursor, limit: 20 });
-      if (scopeRef.current === scope) setArchive(page);
-    } catch (e) { if (scopeRef.current === scope) setError(problem(e)); }
+  const findArchive = (cursor = '', type = archiveType) => {
+    // Pagination continues the last applied filters, not unsubmitted edits in the date/account controls.
+    const params = cursor ? {...archiveParams, cursor} : {scope: 'archive', from, to, ...(type === 'single' && {targetId: archiveTarget, reportType: 'single'}), cursor: '', limit: 20};
+    setError(''); setArchiveParams(params);
+    const selection: StatusSelection = {op: type === 'batch' ? 'batches' : 'reports', params}; desiredStatus.current = selection; void beginStatus(selection, true);
   };
-  const navigate = (next: View) => { if (view === 'settings' && next !== 'settings' && dirty.current && !confirm('检测设置有未保存的修改，确定离开并放弃吗？')) return; changeView(next); setError(''); if (next === 'archive') void findArchive(); };
+  const dismissSettings = () => { if (dirty.current && !confirm('检测设置有未保存的修改，确定关闭并放弃吗？')) return false; settingsOpenRef.current = false; setSettingsOpen(false); return true; };
+  const showSettings = () => { batchApprovalEpoch.current++; discardChecks(); settingsOpenRef.current = true; setSettingsOpen(true); };
+  useEffect(() => {
+    if (!settingsOpen) return;
+    const key = (e: KeyboardEvent) => { if (e.key === 'Escape') { e.preventDefault(); dismissSettings(); } };
+    window.addEventListener('keydown', key); return () => window.removeEventListener('keydown', key);
+  }, [settingsOpen]);
+  const navigate = (next: View) => { if (next === 'settings') { showSettings(); return; } if (settingsOpenRef.current && !dismissSettings()) return; changeView(next); setError(''); if (next === 'archive') { setArchiveType('single'); findArchive('', 'single'); } };
+  const tasksPage = () => { if (settingsOpenRef.current && !dismissSettings()) return; setArchiveType('batch'); changeView('archive'); findArchive('', 'batch'); };
+  const switchMode = (next: 'single' | 'batch') => { batchApprovalEpoch.current++; modeRef.current = next; setMode(next); if (next === 'batch') setBatchOpened(true); };
+  const canBatchApprove = (token: number) => token === batchApprovalEpoch.current && visibleRef.current && latestView.current === 'new' && modeRef.current === 'batch' && !settingsOpenRef.current && Boolean(scopeRef.current);
+  const handleBatchAccepted = (id: string, known?: HubBatchDetail) => { void loadHistory(); if (latestView.current === 'new' && modeRef.current === 'batch' && visibleRef.current) openBatch(id, known); };
 
   const groups = catalog?.groups ?? [];
   const group = catalogGroup(catalog, draft.groupId);
@@ -548,42 +788,57 @@ export default function HubApp({ initialView = 'new' }: { initialView?: View }) 
   const models = upstream?.status === 'done' && upstream.models.length ? upstream.models : libraryFallback ? bankStats?.supported_models ?? [] : [];
   const isChecking = Boolean(actions.report?.target || actions.single?.target);
   const hasDraft = Boolean(account && draft.model.trim());
+  const reportStop = report && stopAction({...report, phase: report.executionPhase ?? (report.status === 'queued' ? 'queued' : reportFinishConfirmed(report) ? 'ended' : 'running')}, Date.now() + serverDelta.current, stopIntent);
+  const retryAllowed = Boolean(report && reportFinishConfirmed(report) && (!report.batchId || report.batchFirstFinishedAtMs));
+  const sectionPicker = <details className="fold hub-section-picker" open>
+          <summary>本次检测内容</summary>
+          <p className="muted">本浏览器会记住这个工作区上次勾选的项目。再次新建时可以继续调整，勾选不会修改主站。</p>
+          <p className="muted">选择分类后使用该分类中全部已启用题目；请在设置里增删或禁用单题。工具、缓存与指纹可能发送多次请求。缓存默认勾选，执行原版六轮检测，会增加请求；可取消。在设置中手动禁用或删除的题目仍跳过。</p>
+          <p className="muted">模型自报检查位于推理题中，默认5分，只对GPT-6系列执行；可在设置里禁用或删除，不修改主站。</p>
+          <div className="hub-sections">{HUB_KINDS.map(section => <label key={section.value} className="hub-checkbox"><input type="checkbox" checked={sections.includes(section.value)} onChange={e => toggleSection(section.value, e.target.checked)} />{section.label}</label>)}</div>
+          {sectionWarning && <p role="status" className="muted">{sectionWarning}</p>}
+        </details>;
   return <div className="hub-app">
     <aside className={'sidebar' + (mobileOpen ? ' mobile-open' : '')}>
       <button type="button" className="sidebar-logo hub-nav-button" onClick={() => navigate('new')}><span className="logo-symbol">?</span><span>掺水<span className="logo-punct">？</span></span></button>
       <div className="sidebar-sub">模型检测台</div>
       <button type="button" className={'nav-home hub-nav-button' + (view === 'new' ? ' active' : '')} onClick={() => navigate('new')}><Icon name="scan" />新建检测</button>
       <div className="hub-extra-nav">
-        <button type="button" className={'nav-home hub-nav-button' + (view === 'settings' ? ' active' : '')} onClick={() => navigate('settings')}><Icon name="layers" />设置与全部题目</button>
+        <button type="button" className={'nav-home hub-nav-button' + (view === 'batch' || view === 'archive' && archiveType === 'batch' ? ' active' : '')} onClick={tasksPage}><Icon name="layers" />任务与结果</button>
         <button type="button" className={'nav-home hub-nav-button' + (view === 'archive' ? ' active' : '')} onClick={() => navigate('archive')}><Icon name="clock" />查找更早记录</button>
       </div>
       <button type="button" className="mobile-history" aria-expanded={mobileOpen} onClick={() => setMobileOpen(!mobileOpen)}><Icon name="clock" /><span>{mobileOpen ? '收起历史' : '历史记录'}</span></button>
       <div className="sidebar-title"><span>本站检测记录</span><button type="button" className="hub-nav-button" onClick={() => void loadHistory()}>刷新</button></div>
       <div className="sidebar-list">
         {(['今天', '昨天'] as const).map(day => {
-          const rows = history.items.filter(row => sidebarDayLabel(row.createdAtMs) === day);
+          const rows = history.items.filter(row => !row.batchId && sidebarDayLabel(row.createdAtMs) === day);
+          const batchRows = batchHistory.items.filter(row => sidebarDayLabel(row.createdAtMs) === day);
           const groups = new Map<string, HubReport[]>();
           rows.forEach(row => { const key = row.groupId ? 'id:' + row.groupId : 'name:' + (row.groupName || '未记录分组'); groups.set(key, [...(groups.get(key) ?? []), row]); });
-          return rows.length > 0 && <section key={day}><div className="sidebar-title">{day}</div>{Array.from(groups).map(([key, reports]) => <section key={key}><div className="sidebar-title">{reports[0].groupName || '未记录分组'}{reports[0].groupId && rows.some(r => r.groupName === reports[0].groupName && r.groupId !== reports[0].groupId) ? ` #${reports[0].groupId}` : ''}</div>{reports.map(row => {
+          return (rows.length > 0 || batchRows.length > 0) && <section key={day}><div className="sidebar-title">{day}</div>{batchRows.map(row => <button type="button" key={row.batchId} data-batch-id={row.batchId} className={'hist-item hub-nav-button' + (batchId === row.batchId && view === 'batch' ? ' active' : '')} onClick={() => openBatch(row.batchId)}><div className="history-model">批量检测 · {row.counts?.ended ?? 0}/{row.counts?.total ?? 0}份已结束</div><div className="history-meta"><b className="hist-badge">{batchStateLabel(row.state)}</b><time className="history-time">{displayTime(row.createdAtMs)}</time></div></button>)}{Array.from(groups).map(([key, reports]) => <section key={key}><div className="sidebar-title">{reports[0].groupName || '未记录分组'}{reports[0].groupId && rows.some(r => r.groupName === reports[0].groupName && r.groupId !== reports[0].groupId) ? ` #${reports[0].groupId}` : ''}</div>{reports.map(row => {
             const saved = object(row.summary), totalScore = saved.totalScore ?? object(saved.total).score, score = totalScore ?? saved.iqScore;
             return <button type="button" key={row.reportId} data-report-id={row.reportId} className={'hist-item hub-nav-button' + (report?.reportId === row.reportId && view === 'report' ? ' active' : '')} onClick={() => void openReport(row.reportId)}><div className="history-model">{row.accountName}{row.accountId ? ` #${row.accountId}` : ''}</div><div className="history-model">{row.model}</div><div className="history-meta"><b className="hist-badge" title={typeof totalScore === 'number' ? '总分' : '推理分'}>{typeof score === 'number' ? `${isVerifiedHubReport(row) && typeof totalScore !== 'number' ? '推理 ' : ''}${score} 分` : reportStatus(row.status)}</b><time className="history-time">{displayTime(row.createdAtMs)}</time></div>{typeof score === 'number' && row.status !== 'done' && <div className="history-model">{reportStatus(row.status)}</div>}</button>;
           })}</section>)}</section>;
         })}
-        {history.items.length === 0 && !historyError && <p className="sidebar-empty">今天和昨天暂无记录。</p>}
+        {history.items.length === 0 && batchHistory.items.length === 0 && !historyError && <p className="sidebar-empty">今天和昨天暂无记录。</p>}
         {history.nextCursor && <button type="button" className="nav-home hub-nav-button" onClick={() => void loadHistory(history.nextCursor)}>显示更多最近记录</button>}
+        {batchHistory.nextCursor && <button type="button" className="nav-home hub-nav-button" onClick={() => void loadHistory('', batchHistory.nextCursor)}>显示更多最近批次</button>}
         {historyError && <p role="alert" className="sidebar-empty">{historyError}</p>}
       </div><div className="sidebar-bottom"><p className="sidebar-retention">只显示当前工作区今天和昨天的记录；更早报告仍可查找。</p></div>
     </aside>
-    <main className="main hub-main" id="main-content"><div className="top-tools"><KnowledgeDates /><button type="button" className="theme-trigger docs-entry" onClick={()=>navigate('docs')}><Icon name="layers" /><span className="tool-label">接口文档</span></button><ThemeMenu /><GitHubLink /></div><div className={"page-shell" + (view === 'report' ? ' history-page' : '')}><header hidden={view === 'report'} className="hub-page-heading"><p className="muted">此页只做检测和保存结果，不会修改主站账号或调度设置。</p><p className="muted">收起或关闭页面不会停止已开始的检测；需要中止请点击停止检测。</p></header>
+    <main className="main hub-main" id="main-content"><div className="top-tools"><KnowledgeDates /><button type="button" className="theme-trigger docs-entry" onClick={()=>navigate('docs')}><Icon name="layers" /><span className="tool-label">接口文档</span></button><button type="button" className="theme-trigger" onClick={showSettings}><Icon name="layers"/><span className="tool-label">设置与全部题目</span></button><ThemeMenu /><GitHubLink /></div><div className={"page-shell" + (view === 'report' ? ' history-page' : '')}><header hidden={view === 'report'} className="hub-page-heading"><p className="muted">此页只做检测和保存结果，不会修改主站账号或调度设置。</p><p className="muted">收起或关闭页面不会停止已开始的检测；需要中止请点击停止检测。</p></header>
       {!boot && <section className="hero-card hub-card"><h1>正在连接调度站…</h1><p>请从调度站中的模型检测入口打开此页。静态页面不会启动检测程序。</p></section>}
-      {runtime && (!runtime.available || runtime.queueBlocked) && <section className="hero-card hub-card"><p className="hub-error" role="alert">{runtime.reason || (runtime.busy ? '当前已有检测正在执行，请等待后点击核查运行状态；仍可查看自己的历史和设置。' : '当前环境未启用硬内存限制，不能开始检测。请按部署说明配置后重试。')}</p><button type="button" className="btn-secondary" onClick={() => void checkRuntime()}>核查运行状态</button></section>}
-      {runtime?.available && runtime.busy && <div className="hub-note" role="status">当前已有检测正在执行，新报告可加入等待队列，不会与它同时执行。<button type="button" className="hub-text-button" onClick={() => void checkRuntime()}>核查运行状态</button></div>}
+      {runtime && (!runtime.available || runtime.queueBlocked || runtime.queryState === 'retained') && <section className="hero-card hub-card"><p className="hub-error" role="alert">{runtime.reason || (runtime.busy ? '当前已有检测正在执行，请等待后点击核查运行状态；仍可查看自己的历史和设置。' : '检测环境或结束状态需要核查。请检查运行诊断后重试。')}</p><div className="actions hub-wrap"><button type="button" className="btn-secondary" onClick={() => void checkRuntime()}>核查运行状态</button>{runtime.recoverable && <button type="button" className="btn-secondary" disabled={recoverBusy} onClick={() => void recoverRuntime()}>核查并重试保存</button>}</div>{runtime.recoverable && <p className="muted">程序已确认结束时，只重试保存，不重新检测或修改主站；退出状态无法确认时须先检查运行环境，此按钮不能解除暂停。</p>}</section>}
+      {runtime?.queryState === 'retained' && <p className="hub-error">无法确认查询程序已退出，已保留位置并暂停后续检测。请检查本实例systemd与原进程后按审核重新启动本调度站后端；已保存回答保留，原等待任务不自动重跑。</p>}
+      {runtime?.otherActive ? <div className="hub-note" role="status">当前有其他检测正在执行。<button type="button" className="hub-text-button" onClick={() => void checkRuntime()}>核查运行状态</button></div> : active ? <div className="hub-note" role="status">当前任务：{active.batchId ? `批次 ${active.batchId} · ` : ''}{active.accountName} · {active.model} · {active.executionPhase ? phaseLabel(active.executionPhase) : reportStatus(active.status)}。切换账号不会改变此任务。{(view !== 'report' || report?.reportId !== active.reportId) && <button type="button" className="hub-text-button" onClick={() => void openReport(active.reportId)}>查看该任务</button>}</div> : runtime?.busy ? <div className="hub-note" role="status">当前已有检测正在执行，新报告可加入等待队列，不会与它同时执行。<button type="button" className="hub-text-button" onClick={() => void checkRuntime()}>核查运行状态</button></div> : null}
       {view !== 'report' && <CheckedMemory report={runtime?.active} />}
-      {active && (view !== 'report' || report?.reportId !== active.reportId) && (!isHubTerminal(active.status) || !active.processExited) && <div className="hub-note" role="status">当前任务：{active.accountName} · {active.model} · {reportStatus(active.status)}。切换账号不会改变此任务。<button type="button" className="hub-text-button" onClick={() => void openReport(active.reportId)}>查看该任务</button></div>}
       {error && <p role="alert" className="hub-error hub-alert">{error}</p>}
-      {view === 'settings' && boot && <HubSettings call={call} onDirtyChange={onDirtyChange} />}
-      {view === 'new' && boot && <div className="opening"><AuditHero /><section className="hero-card connection-card hub-card">
-        <div className="section-heading"><h1>新建账号检测</h1><span className="muted">只预填，不自动检测</span></div>
+      {settingsOpen && boot && <div className="hub-settings-overlay" onClick={e => {if (e.target === e.currentTarget) dismissSettings();}}><section className="hub-settings-dialog" role="dialog" aria-modal="true" aria-label="检测设置"><div className="hub-settings-dialog-head"><strong>检测设置与全部题目</strong><button type="button" className="btn-secondary" onClick={dismissSettings}>关闭设置</button></div><HubSettings call={call} onDirtyChange={onDirtyChange} onSettingsSaved={setSettings} /></section></div>}
+      {view === 'new' && boot && <div className="actions hub-wrap hub-create-mode"><button type="button" className={mode === 'single' ? 'btn-primary' : 'btn-secondary'} onClick={() => switchMode('single')}>单次检测</button><button type="button" className={mode === 'batch' ? 'btn-primary' : 'btn-secondary'} onClick={() => switchMode('batch')}>批量检测</button></div>}
+      {view === 'batch' && boot && <HubBatchView batch={batch} filter={batchFilter} loading={statusLoading} message={batchMessage} stopIntent={stopIntent} onFilter={changeBatchFilter} onReport={openBatchReport} onStop={row => void stop(row)} onRefresh={() => void checkRuntime()} />}
+      {boot && batchOpened && <div hidden={view !== 'new' || mode !== 'batch'}><HubBatchCreate key={boot.generation} call={call} catalog={catalog} catalogNow={() => catalogRef.current} workspaceId={boot.workspaceId} active={view === 'new' && mode === 'batch' && visible && !settingsOpen} sections={sections} settings={settings} available={runtime?.available === true && !runtime.queueBlocked} sectionPicker={sectionPicker} modelsCache={batchModelCache} approvalToken={() => batchApprovalEpoch.current} canApprove={canBatchApprove} onAccepted={handleBatchAccepted} /></div>}
+      {view === 'new' && boot && <div className={"opening" + (mode === 'batch' ? " hub-batch-single-controls" : "")}>{mode === 'single' && <AuditHero />}<section className="hero-card connection-card hub-card">
+        <div className="section-heading"><h1>{mode === 'single' ? '新建账号检测' : '单问单答账号'}</h1><span className="muted">只预填，不自动检测</span></div>
         <p className="muted">分组和账号优先使用上次名单。选中账号后会向该账号的上游读取模型列表，不会修改主站，也不会开始检测。</p>
         <div className="connection-grid">
           <div className="field"><label>分组<Select value={draft.groupId} onChange={e => chooseDraft({ groupId: e.target.value })}>
@@ -621,19 +876,11 @@ export default function HubApp({ initialView = 'new' }: { initialView?: View }) 
             </div>
           </div>
         </>}
-        <details className="fold hub-section-picker" open>
-          <summary>本次检测内容</summary>
-          <p className="muted">本浏览器会记住这个工作区上次勾选的项目。再次新建时可以继续调整，勾选不会修改主站。</p>
-          <p className="muted">选择分类后使用该分类中全部已启用题目；请在设置里增删或禁用单题。工具、缓存与指纹可能发送多次请求。缓存默认勾选，执行原版六轮检测，会增加请求；可取消。在设置中手动禁用或删除的题目仍跳过。</p>
-          <p className="muted">模型自报检查位于推理题中，默认5分，只对GPT-6系列执行；可在设置里禁用或删除，不修改主站。</p>
-          <div className="hub-sections">{HUB_KINDS.map(section => <label key={section.value} className="hub-checkbox"><input type="checkbox" checked={sections.includes(section.value)} onChange={e => toggleSection(section.value, e.target.checked)} />{section.label}</label>)}</div>
-          {sectionWarning && <p role="status" className="muted">{sectionWarning}</p>}
-        </details>
+        {mode === 'single' && sectionPicker}
         <p className="hub-note">点击开始后会向所选上游发送请求，可能产生费用；请先核对账号、模型和题目。检测任务默认{settings?.memoryLimitMiB ?? 256}MiB，整个检测子项目最多约0.5GB；报告保存后程序退出。</p>
-        <div className="actions hub-wrap">
-          <button type="button" className="btn-primary" disabled={Boolean(actions.report || pending.report) || !hasDraft || modelLoading || !sections.length || runtime?.available !== true || runtime?.queueBlocked === true} onClick={() => void start()}>{actions.report?.target ? '正在核对账号…' : actions.report ? '正在确认受理…' : active || runtime?.busy || (runtime?.queuedCount ?? 0) > 0 ? '加入等待队列' : '开始检测'}</button>
-          <button type="button" className="btn-secondary" onClick={() => navigate('settings')}>设置与全部题目</button>
-        </div>
+        {mode === 'single' && <div className="actions hub-wrap">
+          <button type="button" className="btn-primary" disabled={Boolean(actions.report || pending.report) || !hasDraft || modelLoading || !sections.length || runtime?.available !== true || runtime?.queueBlocked === true} onClick={() => void start()}>{actions.report?.target ? '正在核对账号…' : actions.report ? '正在确认受理…' : active || runtime?.busy || runtime?.otherActive || (runtime?.queuedCount ?? 0) > 0 ? '加入等待队列' : '开始检测'}</button>
+        </div>}
         {pending.report && <section className="hub-note" aria-label="普通检测受理">
           <p>{pendingWarning}</p><p>原报告编号 <strong>{pending.report.reportId}</strong></p>
           <div className="actions hub-wrap">
@@ -643,7 +890,7 @@ export default function HubApp({ initialView = 'new' }: { initialView?: View }) 
         </section>}
         <div className="bank-strip"><span><Icon name="layers"/><b>{bankStats?.fingerprint_count ?? '—'}</b> 个可测模型</span><Hint label="模型库说明" text="服务端在检测任务中检查模型基线更新。数字指纹仅对库内候选比较，行为参考不等于型号证明。"/></div>
       </section></div>}
-      {view === 'new' && boot && <SingleAskPanel
+      {boot && <div hidden={view !== 'new'}><SingleAskPanel
         key={boot.generation}
         model={draft.model}
         canRun={hasDraft && !modelLoading && !actions.single && (!pending.single || pending.single.accepted === true)}
@@ -655,23 +902,25 @@ export default function HubApp({ initialView = 'new' }: { initialView?: View }) 
           confirm: (method, signal) => confirmSubmission('single', method, signal),
           open: () => void openReport(pending.single!.reportId),
         }}
-      />}
+      /></div>}
       {view === 'report' && report && <>
         <section className="hero-card">
-          <div className="section-heading"><div><span className="step">报告</span><h2>按检测 ID 查看</h2></div><span className="muted">本站检测报告</span></div>
-          <form className="report-lookup" onSubmit={e => { e.preventDefault(); if (reportLookup.trim()) void openReport(reportLookup.trim()); }}><label className="sr-only" htmlFor="hub-report-id">检测 ID</label><input id="hub-report-id" value={reportLookup} placeholder="粘贴检测 ID" onChange={e => setReportLookup(e.target.value)} /><button type="submit" className="btn-primary">查看报告</button></form>
+          <div className="section-heading"><div><span className="step">报告</span><h2>本站检测报告</h2></div>{report.batchId && <button type="button" className="btn-secondary" onClick={returnBatch}>返回批次</button>}</div>
+          {report.batchId && <p className="muted">{batchNav.current?.reportId === report.reportId && batchNav.current.id === report.batchId ? '返回原批次及刚才的筛选位置，后台检测继续执行。' : '查看本报告所属批次，后台检测继续执行。'}</p>}
+          <details className="fold"><summary>按编号查找其他报告</summary><p className="muted">输入报告编号后查看已保存结果，不会开始检测或修改主站。</p><form className="report-lookup" onSubmit={e => { e.preventDefault(); if (reportLookup.trim()) void openReport(reportLookup.trim()); }}><label className="sr-only" htmlFor="hub-report-id">检测 ID</label><input id="hub-report-id" value={reportLookup} placeholder="粘贴检测 ID" onChange={e => setReportLookup(e.target.value)} /><button type="submit" className="btn-primary">查看报告</button></form></details>
           <h1 className="hero-title">{report.model}</h1>
-          <p className="report-meta">{new Date(report.createdAtMs).toLocaleString('zh-CN')} · {reportStatus(report.status)} · 账号：{report.accountName} · 分组：{report.groupName}</p>
+          <p className="report-meta">{new Date(report.createdAtMs).toLocaleString('zh-CN')} · {report.executionPhase ? phaseLabel(report.executionPhase) : reportStatus(report.status)} · 账号：{report.accountName} · 分组：{report.groupName}</p>
           <ReportShare id={report.reportId} identityLabel="报告编号" reportHref={(()=>{if(typeof window==='undefined')return '';const url=new URL(window.parent.location.href);url.searchParams.set('detectorReport',report.reportId);return url.href;})()} actions={<>            <button type="button" className="btn-secondary" onClick={() => void checkRuntime()}>核查运行状态</button>
-            {(!isHubTerminal(report.status) || !report.processExited) && <button type="button" className="btn-secondary" disabled={busy} onClick={() => void stop()}>{report.diagnostic ? '停止检测并重试保存状态' : stopRequested === report.reportId ? '正在停止…' : report.status === 'queued' ? '取消等待' : report.processExited ? '停止检测并重试保存状态' : '停止检测'}</button>}
-            <button type="button" className="btn-secondary" disabled={retryBusy || (!retryPending && (!itemsComplete || !isHubTerminal(report.status) || report.processExited !== true || !items.some(canRetryHubItem)))} onClick={() => void retryItems(items.filter(canRetryHubItem).map(item => item.itemId))}>{retryBusy ? '正在确认补测…' : retryPending ? '用原操作确认补测受理' : `补测失败项（${items.filter(canRetryHubItem).length}）`}</button>
-            <button type="button" className="btn-secondary" onClick={() => { chooseDraft({ targetId: report.targetId, groupId: report.groupId }, true); changeView('new'); }}>重新检测（新任务）</button>
+            {reportStop && <button type="button" className="btn-secondary" disabled={busy || reportStop.disabled} onClick={() => void stop()}>{reportStop.label}</button>}
+            <button type="button" className="btn-secondary" disabled={retryBusy || (!retryPending && (!itemsComplete || !retryAllowed || !items.some(canRetryHubItem)))} onClick={() => void retryItems(items.filter(canRetryHubItem).map(item => item.itemId))}>{retryBusy ? '正在确认补测…' : retryPending ? '用原操作确认补测受理' : `补测失败项（${items.filter(canRetryHubItem).length}）`}</button>
+            <button type="button" className="btn-secondary" onClick={() => { chooseDraft({ targetId: report.targetId, groupId: report.groupId }, true); switchMode('single'); changeView('new'); }}>重新检测（新任务）</button>
 </>} />
           <p className="muted">报告链接通过本站登录和当前工作区权限校验；复制链接不会公开报告。报告长期保存在磁盘，可在原报告补测失败项。</p>
-          <p className="muted">补测只重新提问失败或未完成项，成功结果保留，结果更新到本报告；可能产生请求费用，不修改主站。{!itemsComplete ? '题目还未读完，请先等待读取完成。' : !isHubTerminal(report.status) ? '本轮正在运行或等待，结束后可再补测。' : report.processExited !== true ? '上一轮程序退出尚未确认，请先核查运行状态。' : !items.some(canRetryHubItem) ? '当前没有需要补测的失败项目。' : ''}</p>
-          {stopRequested === report.reportId && <p role="status" className="muted">正在停止，已完成回答仍可查看。</p>}
-          {report.status === 'queued' && typeof report.queuePosition === 'number' && <p role="status" className="muted">已加入等待，前面还有{Math.max(0, report.queuePosition)}份报告；轮到后自动开始，此时尚未发送检测题目。</p>}
-          {report.status === 'cancelled' && <p className="muted">已停止，已保存回答保留；未执行题目不作答错。</p>}
+          <p className="muted">补测只重新提问失败或未完成项，成功结果保留，结果更新到本报告；可能产生请求费用，不修改主站。{!itemsComplete ? '题目还未读完，请先等待读取完成。' : !isHubTerminal(report.status) ? '本轮正在运行或等待，结束后可再补测。' : !reportFinishConfirmed(report) ? '上一轮程序退出或结束状态尚未确认，请先核查运行状态。' : !items.some(canRetryHubItem) ? '当前没有需要补测的失败项目。' : ''}</p>
+          {report.batchId && !report.batchFirstFinishedAtMs && <p className="muted">请先等本批首次执行结束，再补测这份报告的失败或未完成项；已保存回答保留。</p>}
+          {reportStop && <p className="muted">{reportStop.label === '取消等待' ? '只取消这一份尚未开始的任务，不发送检测题目；其他任务继续保留。' : reportStop.label === '再次停止' ? '只有上次停止调用已返回且确认时间已过，才可再次停止这一份；会重新等待15秒确认，不影响其他任务。上次调用未返回时请先检查环境。' : '只停止这一份检测，已保存回答保留，不修改主站；其他等待任务在结束处理完成后继续。'}</p>}
+          {report.status === 'queued' && (!report.executionPhase || report.executionPhase === 'queued') && typeof report.queuePosition === 'number' && <p role="status" className="muted">已加入等待，前面还有{Math.max(0, report.queuePosition)}份报告；轮到后自动开始，此时尚未发送检测题目。</p>}
+          {report.status === 'cancelled' && reportFinishConfirmed(report) && <p className="muted">已停止，已保存回答保留；未执行题目不作答错。</p>}
           {reportMessage && <p role="status" className="muted">{reportMessage}</p>}
           {report.diagnostic && <p className="error-box" role="alert">{report.diagnostic}</p>}
           {reportError(report.error) && <p className="error-box" role="alert">{reportError(report.error)}</p>}
@@ -680,16 +929,25 @@ export default function HubApp({ initialView = 'new' }: { initialView?: View }) 
           <details className="fold"><summary>运行与资源详情</summary><CheckedMemory report={report} /><p className="muted">结果只供人工检阅，不会自动降权、停用或恢复账号。配置不同的报告不宜只比较总分。</p></details>
         </section>
         <HubReportContent key={report.reportId} report={report} items={items} complete={itemsComplete} itemsReadVersion={itemsReadVersion}
-          retryHold={retryBusy || retryPending?.reportId === report.reportId} readHold={runtimeChecking}
+          retryHold={retryBusy || retryPending?.reportId === report.reportId} readHold={runtimeChecking || Boolean(stopIntent?.reportId === report.reportId) || !reportFinishConfirmed(report) && isHubTerminal(report.status)}
           onRefresh={async expectedReportId => {
             if (expectedReportId && (!alive.current || latestView.current !== 'report' || lastReport.current?.reportId !== expectedReportId)) return;
             setItemsReadVersion('');
             return openReport(report.reportId);
           }}
-          readFailed={Boolean(itemError) || itemBusy} call={call} onRetry={ids => void retryItems(ids)} retryDisabled={retryBusy || !itemsComplete || !isHubTerminal(report.status) || report.processExited !== true || Boolean(retryPending)} />
+          readFailed={Boolean(itemError) || itemBusy} call={call} onRetry={ids => void retryItems(ids)} retryDisabled={retryBusy || !itemsComplete || !retryAllowed || Boolean(retryPending)} />
       </>}
       {view === 'docs' && <><p className="hub-note">以下保留原版独立检测服务的接口说明，本站未开放这些匿名公共接口；本站检测请使用当前页面的账号入口。查看说明不会发起检测或修改主站。</p><UpstreamApiDocs referenceOnly /></>}
-      {view === 'archive' && boot && <section className="hero-card hub-card"><h1>查找更早记录</h1><p className="muted">历史报告长期保存在磁盘，按新加坡日期筛选；默认查询最近30天。不会重新调用模型。</p><div className="hub-form-grid"><div className="field"><label>开始日期<input type="date" value={from} onChange={e => setFrom(e.target.value)} /></label></div><div className="field"><label>结束日期<input type="date" value={to} onChange={e => setTo(e.target.value)} /></label></div><div className="field"><label>账号<Select value={archiveTarget} onChange={e => setArchiveTarget(e.target.value)}><option value="">全部账号</option>{targets.map(t => <option key={t.targetId} value={t.targetId}>{t.accountName}</option>)}</Select></label></div></div><button type="button" className="btn-primary" onClick={() => void findArchive()}>查找报告</button><div className="hub-search field"><label>按报告编号查找<input value={reportLookup} onChange={e => setReportLookup(e.target.value)} /></label><button type="button" className="btn-secondary" onClick={() => void openReport(reportLookup.trim())}>打开此报告</button></div>{archive.items.map(row => <div className="hub-question-row" key={row.reportId}><div><strong>{row.accountName} · {row.model}</strong><p className="muted">{displayTime(row.createdAtMs, true)} · {row.groupName} · {reportStatus(row.status)}</p></div><button type="button" className="btn-secondary" onClick={() => void openReport(row.reportId)}>查看报告</button></div>)}{archive.items.length === 0 && <p className="muted">此范围没有报告，可调整日期或直接输入报告编号。</p>}{archive.nextCursor && <button type="button" className="btn-secondary" onClick={() => void findArchive(archive.nextCursor)}>下一页报告</button>}</section>}
+      {view === 'report' && !report && boot && <section className="hero-card hub-card"><h1>查看已保存报告</h1><p>{statusLoading ? '正在读取报告…' : '尚未读取报告，请核查运行状态。'}</p><button type="button" className="btn-secondary" onClick={() => void checkRuntime()}>核查运行状态</button><form className="report-lookup" onSubmit={e => {e.preventDefault(); if(reportLookup.trim()) void openReport(reportLookup.trim());}}><label className="sr-only">报告编号</label><input value={reportLookup} placeholder="粘贴报告编号" onChange={e => setReportLookup(e.target.value)} /><button type="submit" className="btn-primary">查看报告</button></form></section>}
+      {view === 'archive' && boot && <section className="hero-card hub-card"><h1>{archiveType === 'batch' ? '任务与结果' : '查找更早记录'}</h1><p className="muted">历史记录长期保存在磁盘，按新加坡日期筛选；默认查询最近30天。只查看保存的记录，不会重新调用模型或修改主站。</p>
+        <div className="actions hub-wrap"><button type="button" className={archiveType === 'single' ? 'btn-primary' : 'btn-secondary'} onClick={() => {setArchiveType('single'); findArchive('', 'single');}}>单次记录</button><button type="button" className={archiveType === 'batch' ? 'btn-primary' : 'btn-secondary'} onClick={() => {setArchiveType('batch'); findArchive('', 'batch');}}>批次记录</button></div>
+        <div className="hub-form-grid"><div className="field"><label>开始日期<input type="date" value={from} onChange={e => setFrom(e.target.value)} /></label></div><div className="field"><label>结束日期<input type="date" value={to} onChange={e => setTo(e.target.value)} /></label></div>{archiveType === 'single' && <div className="field"><label>账号<Select value={archiveTarget} onChange={e => setArchiveTarget(e.target.value)}><option value="">全部账号</option>{targets.map(t => <option key={t.targetId} value={t.targetId}>{t.accountName}</option>)}</Select></label></div>}</div>
+        <button type="button" className="btn-primary" onClick={() => void findArchive()}>查找{archiveType === 'batch' ? '批次' : '报告'}</button>
+        <div className="hub-search field"><label>按批次编号查找<input value={batchLookup} onChange={e => setBatchLookup(e.target.value)} /></label><button type="button" className="btn-secondary" onClick={() => openBatch(batchLookup.trim())}>打开此批次</button></div><p className="muted">按批次编号查看已保存任务，不重新提交或修改主站；暂未找到请稍后再查原编号。</p>
+        <div className="hub-search field"><label>按报告编号查找<input value={reportLookup} onChange={e => setReportLookup(e.target.value)} /></label><button type="button" className="btn-secondary" onClick={() => void openReport(reportLookup.trim())}>打开此报告</button></div><p className="muted">输入报告编号后查看已保存结果，不会开始检测或修改主站。</p>
+        {archiveType === 'single' ? <>{archive.items.filter(row => !row.batchId).map(row => <div className="hub-question-row" key={row.reportId}><div><strong>{row.accountName} · {row.model}</strong><p className="muted">{displayTime(row.createdAtMs, true)} · {row.groupName} · {reportStatus(row.status)}</p></div><button type="button" className="btn-secondary" onClick={() => void openReport(row.reportId)}>查看报告</button></div>)}{archive.items.length === 0 && <p className="muted">此范围没有报告，可调整日期或直接输入报告编号。</p>}{archive.nextCursor && <button type="button" className="btn-secondary" onClick={() => void findArchive(archive.nextCursor)}>下一页报告</button>}</> : <>{archiveBatches.items.map(row => <div className="hub-question-row" key={row.batchId}><div><strong>批量检测 · {batchStateLabel(row.state)} · {row.counts?.ended}/{row.counts?.total}份已结束</strong><p className="muted">{displayTime(row.createdAtMs, true)}</p></div><button type="button" className="btn-secondary" onClick={() => openBatch(row.batchId)}>查看批次</button></div>)}{archiveBatches.items.length === 0 && <p className="muted">此范围没有批次，可调整日期或直接输入批次编号。</p>}{archiveBatches.nextCursor && <button type="button" className="btn-secondary" onClick={() => void findArchive(archiveBatches.nextCursor)}>下一页批次</button>}{batchMessage && <p role="status" className="hub-error">{batchMessage}</p>}</>}
+      </section>}
+
     </div></main>
   </div>;
 }

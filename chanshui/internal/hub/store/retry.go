@@ -69,9 +69,9 @@ func (s *Store) RetryReport(ctx context.Context, o Owner, r RetryRequest) (Repor
 			return e
 		}
 		defer tx.Rollback()
-		var snapshotRaw, status, summaryRaw string
+		var snapshotRaw, status, summaryRaw, batchID string
 		var target Target
-		e = tx.QueryRowContext(ctx, `SELECT snapshot_json,status,summary_json,account_id,account_name,group_name,base_url,protocol FROM hub_reports WHERE user_id=? AND workspace_id=? AND report_id=?`, o.UserID, o.WorkspaceID, r.ReportID).Scan(&snapshotRaw, &status, &summaryRaw, &target.AccountID, &target.AccountName, &target.GroupName, &target.BaseURL, &target.Protocol)
+		e = tx.QueryRowContext(ctx, `SELECT snapshot_json,status,summary_json,account_id,account_name,group_name,base_url,protocol,coalesce(batch_id,'') FROM hub_reports WHERE user_id=? AND workspace_id=? AND report_id=?`, o.UserID, o.WorkspaceID, r.ReportID).Scan(&snapshotRaw, &status, &summaryRaw, &target.AccountID, &target.AccountName, &target.GroupName, &target.BaseURL, &target.Protocol, &batchID)
 		if e == sql.ErrNoRows {
 			return Fail(404, "报告不存在或不属于当前工作区", "report")
 		}
@@ -97,6 +97,15 @@ func (s *Store) RetryReport(ctx context.Context, o Owner, r RetryRequest) (Repor
 		}
 		if status != "done" && status != "partial" && status != "cancelled" && status != "interrupted" {
 			return Fail(409, "本报告仍在运行或等待，请等待结束或先停止；没有重复补测", "retry")
+		}
+		if batchID != "" {
+			var firstFinished int64
+			if e = tx.QueryRowContext(ctx, `SELECT first_finished_at_ms FROM hub_batches WHERE batch_id=? AND user_id=? AND workspace_id=?`, batchID, o.UserID, o.WorkspaceID).Scan(&firstFinished); e != nil {
+				return e
+			}
+			if firstFinished == 0 {
+				return Fail(409, "请先等本批首次执行结束，再补测这份报告的失败或未完成项；已保存回答保留", "retry")
+			}
 		}
 		if r.Target != nil && (target.AccountID != r.Target.AccountID || target.BaseURL != r.Target.BaseURL || target.Protocol != r.Target.Protocol) {
 			return Fail(409, "原报告的账号、地址或协议已变化，请重新检测；没有修改原报告", "retry")

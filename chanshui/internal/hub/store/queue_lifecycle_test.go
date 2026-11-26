@@ -40,6 +40,7 @@ func TestVersionTwoMigrationUpdatesOnlyOldDefaultsAndKeepsSnapshots(t *testing.T
 	if _, err = s.CreateReport(ctx, testOwner, createRequest(id)); err != nil {
 		t.Fatal(err)
 	}
+	stripV8ForMigrationFixture(t, s)
 	if _, err = s.db.Exec(`DROP INDEX hub_reports_one_active; CREATE UNIQUE INDEX hub_reports_one_active ON hub_reports((1)) WHERE status IN('queued','running'); PRAGMA user_version=1`); err != nil {
 		t.Fatal(err)
 	}
@@ -200,6 +201,7 @@ func TestVersionTwoMigrationRollsBackOnSettingsWriteFailure(t *testing.T) {
 	if _, err = s.Settings(context.Background(), testOwner); err != nil {
 		t.Fatal(err)
 	}
+	stripV8ForMigrationFixture(t, s)
 	if _, err = s.db.Exec(`UPDATE hub_settings SET settings_json=json_set(settings_json,'$.concurrency',2); DROP INDEX hub_reports_one_active; CREATE UNIQUE INDEX hub_reports_one_active ON hub_reports((1)) WHERE status IN('queued','running'); CREATE TRIGGER refuse_migration BEFORE UPDATE ON hub_settings BEGIN SELECT RAISE(ABORT,'migration fixture unavailable'); END; PRAGMA user_version=1`); err != nil {
 		t.Fatal(err)
 	}

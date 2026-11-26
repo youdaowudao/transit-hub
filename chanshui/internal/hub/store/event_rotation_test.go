@@ -73,6 +73,7 @@ func TestKnowledgeV6RotatesOnlyUntouchedDefaults(t *testing.T) {
 	if err := s.db.QueryRowContext(ctx, "SELECT snapshot_json FROM hub_reports WHERE report_id=?", reportID).Scan(&snapshot); err != nil {
 		t.Fatal(err)
 	}
+	stripV8ForMigrationFixture(t, s)
 	if _, err := s.db.ExecContext(ctx, `PRAGMA user_version=5`); err != nil {
 		t.Fatal(err)
 	}
@@ -139,6 +140,7 @@ func TestKnowledgeV6SupplementsPreserveWorkspacesAndUseFortyQuestionLimit(t *tes
 			t.Fatal(err)
 		}
 	}
+	stripV8ForMigrationFixture(t, s)
 	for _, statement := range []string{
 		`DELETE FROM hub_questions WHERE question_id IN ('` + january + `','` + february + `','` + march + `','Q10','knowledge:ao_2025_zverev','knowledge:afcon_2026_goal')`,
 		`UPDATE hub_questions SET definition_json=json_set(definition_json,'$.title','用户改过的澳网题'),revision=2 WHERE question_id='knowledge:ao_2026_women'`,
@@ -301,6 +303,7 @@ func TestEventRotationPreservesCustomizationAndFrozenQueue(t *testing.T) {
 	if err = s.db.QueryRow("SELECT snapshot_json FROM hub_reports WHERE report_id=?", reportID).Scan(&originalSnapshot); err != nil {
 		t.Fatal(err)
 	}
+	stripV8ForMigrationFixture(t, s)
 	if _, err = s.db.Exec("PRAGMA user_version=3"); err != nil {
 		t.Fatal(err)
 	}
@@ -367,6 +370,7 @@ func TestEventRotationRollsBackPartialWritesAndCanRetry(t *testing.T) {
 		t.Fatal(err)
 	}
 	seedLegacyKnowledge(t, s, testOwner)
+	stripV8ForMigrationFixture(t, s)
 	_, err = s.db.Exec(`PRAGMA user_version=3;
 		CREATE TRIGGER reject_second_event BEFORE INSERT ON hub_questions
 		WHEN NEW.question_id='knowledge:icc_2025_india'

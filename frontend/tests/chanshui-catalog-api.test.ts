@@ -51,3 +51,18 @@ it.each(['', ' \n\t'])('名单读取的空白原因%j按未知原因显示核查
   expect(error).not.toMatch(/计费|重复新建|原报告/)
   await expect(requestChanshui('targets', {}, 'w')).rejects.toHaveProperty('message', message)
 })
+
+it('批次读取和受理使用专用路径，旧登录迟到401不清除当前登录', async () => {
+  const request = { batchId: 'a'.repeat(32), tasks: [] }
+  expect(chanshuiRequestSpec('start-batch', request)).toEqual({ path: '/batches', method: 'POST', body: request })
+  expect(chanshuiRequestSpec('batch', { batchId: request.batchId, offset: 10, view: 'results', status: 'ended', model: 'A/B' }).path).toEqual(`/batches/${request.batchId}?offset=10&model=A%2FB&status=ended&view=results`)
+  expect(chanshuiRequestSpec('recover-runtime')).toEqual({ path: '/runtime/recover', method: 'POST' })
+  let resolve!: (response: Response) => void
+  const fetch = vi.fn(() => new Promise<Response>(r => { resolve = r }))
+  vi.stubGlobal('fetch', fetch)
+  const pending = requestChanshui('start-batch', request, 'w')
+  localStorage.setItem(authTokenStorageKey, 'catalog-token-b')
+  resolve(new Response('{"message":"old unauthorized"}', { status: 401 }))
+  await expect(pending).rejects.toMatchObject({ details: { operationResult: 'unknown' } })
+  expect(localStorage.getItem(authTokenStorageKey)).toBe('catalog-token-b')
+})

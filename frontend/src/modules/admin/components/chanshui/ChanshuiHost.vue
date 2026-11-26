@@ -27,9 +27,10 @@ const targetSnapshot = (): ChanshuiTargetInput => {
 
 let generation = 0, timeout: ReturnType<typeof setTimeout> | undefined, loadingTimer: ReturnType<typeof setTimeout> | undefined
 let catalogSequence = 0, catalogController: AbortController | undefined
-const requests = new Map<string, AbortController>()
+type HostRequest = { controller: AbortController; timer: ReturnType<typeof setTimeout>; started: boolean; op: string }
+const requests = new Map<string, HostRequest>()
 let serial = Promise.resolve()
-let stopGeneration: number | undefined
+let stopRequest: HostRequest | undefined, stateRequest: HostRequest | undefined
 const send = (kind: string, data: Record<string, unknown> = {}) => {
   if (['chanshui.BOOT', 'chanshui.CATALOG', 'chanshui.OPEN_TARGET'].includes(kind) && !workspaceReady()) return
   iframe.value?.contentWindow?.postMessage({ kind, v: 1, generation, ...data }, window.location.origin)
@@ -43,7 +44,26 @@ const discardDraftChecks = (nextTarget?: ChanshuiTargetInput) => {
   }
 }
 const clearTimers = () => { if (timeout) clearTimeout(timeout); if (loadingTimer) clearTimeout(loadingTimer) }
-const invalidate = () => { generation++; for (const c of requests.values()) c.abort(); requests.clear(); serial = Promise.resolve(); stopGeneration = undefined }
+const invalidate = () => {
+  generation++
+  for (const request of requests.values()) { clearTimeout(request.timer); request.controller.abort() }
+  requests.clear(); serial = Promise.resolve(); stopRequest = stateRequest = undefined
+}
+const releaseRequest = (id: string, request: HostRequest) => {
+  clearTimeout(request.timer)
+  if (requests.get(id) === request) requests.delete(id)
+  if (stopRequest === request) stopRequest = undefined
+  if (stateRequest === request) stateRequest = undefined
+}
+const abortRequest = (id: string, request: HostRequest) => {
+  if (requests.get(id) !== request) return
+  releaseRequest(id, request)
+  request.controller.abort()
+  send('chanshui.response', { id, ok: false, error: {
+    message: !request.started ? '等待发送超过45秒或页面已取消，本次没有发送请求；请核查原记录后再操作。' : request.op === 'start-batch' ? '等待批次受理结果超过45秒，尚不能确认是否已创建。请查询原批次编号，不要另建一批。' : '等待调度站结果已超时或取消，不能确认后台操作结果。请核查原编号；不要重复检测或停止。',
+    status: 0, operationResult: request.started ? 'unknown' : 'not_started',
+  } })
+}
 const cancelCatalog = () => { catalogSequence++; catalogController?.abort(); catalogController = undefined; catalogLoading.value = false }
 const close = () => { dirty.value = false; invalidate(); cancelCatalog(); clearTimers(); open.value = false; minimized.value = false; ready.value = false; error.value = ''; catalogError.value = ''; catalogWarning.value = ''; iframe.value = null }
 const waitForWorkspace = () => {
@@ -102,14 +122,21 @@ const restore = () => {
   send('chanshui.VISIBILITY', { visible: true })
 }
 const reload = () => { if (dirty.value && !window.confirm('检测设置有未保存的修改，确定重新载入并放弃吗？')) return; if (!workspaceReady()) { waitForWorkspace(); return }; dirty.value = false; invalidate(); arm(); if (iframe.value) iframe.value.src = '/chanshui/'; restoreChanshuiCatalog(props.workspaceId); if (!catalog.value) void loadCatalog() }
-const checkFirstStart = (scope: number, id: string, workspaceId: string, params: Record<string, unknown>) => {
+const checkFirstStart = (scope: number, id: string, workspaceId: string, params: Record<string, unknown>, batch: boolean) => {
   if (!open.value || !ready.value || minimized.value || scope !== generation || workspaceId !== props.workspaceId || !workspaceReady()) return '检测页已关闭、收起或切换工作区。'
   try {
     if (session !== getAccessToken()) return '登录状态已切换。'
-    const group = catalog.value?.groups.find(group => group.id === params.groupId)
-    const account = group?.accounts.find(account => account.targetId === params.targetId)
-    if (!account || group?.accountsError) return '当前名单已没有这个分组或账号。请点击窗口顶部“更新分组和账号”后重新选择。'
-    const guard = new CustomEvent('chanshui.before-start', { cancelable: true, detail: { generation: scope, id, protocol: account.protocol } })
+    const tasks = batch ? params.tasks : [params]
+    if (!Array.isArray(tasks) || tasks.length < 1 || tasks.length > 32) return '检测组合必须包含1～32份报告。'
+    const protocols: { targetId: string; groupId: string; protocol: unknown }[] = []
+    for (const task of tasks) {
+      if (!task || typeof task !== 'object' || typeof task.groupId !== 'string' || typeof task.targetId !== 'string') return '检测组合中的分组或账号无效。'
+      const group = catalog.value?.groups.find(group => group.id === task.groupId)
+      const account = group?.accounts.find(account => account.targetId === task.targetId)
+      if (!account || group?.accountsError) return '当前名单已没有这个分组或账号。请点击窗口顶部“更新分组和账号”后重新选择。'
+      protocols.push({ targetId: task.targetId, groupId: task.groupId, protocol: account.protocol })
+    }
+    const guard = new CustomEvent('chanshui.before-start', { cancelable: true, detail: { generation: scope, id, ...(batch ? { protocols } : { protocol: protocols[0].protocol }) } })
     if (iframe.value?.contentWindow?.dispatchEvent(guard) === false) return ''
   } catch {
     return '无法连接当前检测页。'
@@ -127,12 +154,19 @@ const onMessage = (event: MessageEvent) => {
     return
   }
   if (message.kind === 'chanshui.DIRTY' && message.generation === generation && typeof message.dirty === 'boolean') { dirty.value = message.dirty; return }
+  if (message.kind === 'chanshui.abort' && message.generation === generation && typeof message.id === 'string') {
+    const existing = requests.get(message.id)
+    if (existing) abortRequest(message.id, existing)
+    return
+  }
   if (message.kind !== 'chanshui.request' || message.generation !== generation || typeof message.id !== 'string' || !/^[a-zA-Z0-9-]{1,80}$/.test(message.id) || typeof message.op !== 'string') return
-  const scope = generation, requestId = message.id, workspaceId = props.workspaceId
+  const scope = generation, requestId = message.id, workspaceId = props.workspaceId, op = message.op
   if (requests.has(requestId)) return
-  const priorityStop = message.op === 'cancel'
-  const guardStart = message.op === 'start' && message.guardStart === true
-  if ((!priorityStop && requests.size >= 12) || (priorityStop && stopGeneration === generation)) {
+  const priorityStop = op === 'cancel'
+  const priorityState = message.afterStop === true && ['report', 'batch', 'runtime'].includes(op)
+  const guardStart = op === 'start-batch' || (op === 'start' && message.guardStart === true)
+  const ordinaryCount = requests.size - (stopRequest ? 1 : 0) - (stateRequest ? 1 : 0)
+  if ((!priorityStop && !priorityState && ordinaryCount >= 12) || (priorityStop && stopRequest) || (priorityState && stateRequest)) {
     send('chanshui.response', { id: requestId, ok: false, error: { message: priorityStop ? '停止请求正在处理，已保存回答仍可查看；请稍候核查运行状态。' : '正在处理其他页面操作，已显示内容仍可查看；请稍后重试读取。', status: 429 } })
     return
   }
@@ -140,26 +174,31 @@ const onMessage = (event: MessageEvent) => {
   try {
     params = message.params && typeof message.params === 'object' && !Array.isArray(message.params) ? message.params : {}
     if (new TextEncoder().encode(JSON.stringify(params)).byteLength > 128 * 1024) throw new Error('请求内容超过允许大小。')
-    chanshuiRequestSpec(message.op, params)
-  } catch (e) { send('chanshui.response', { id: requestId, ok: false, error: { message: e instanceof Error ? e.message : '此操作无法识别。' } }); return }
-  const controller = new AbortController(); requests.set(requestId, controller)
-  if (priorityStop) stopGeneration = scope
+    chanshuiRequestSpec(op, params)
+  } catch (e) { send('chanshui.response', { id: requestId, ok: false, error: { message: e instanceof Error ? e.message : '此操作无法识别。', operationResult: 'not_started' } }); return }
+  const controller = new AbortController()
+  const request: HostRequest = { controller, started: false, op, timer: setTimeout(() => abortRequest(requestId, request), 45000) }
+  requests.set(requestId, request)
+  if (priorityStop) stopRequest = request
+  if (priorityState) stateRequest = request
+  const current = () => scope === generation && requests.get(requestId) === request && !controller.signal.aborted
   const run = async () => {
-    if (scope !== generation) return
+    if (!current()) return
     try {
-      const blockedStart = guardStart ? checkFirstStart(scope, requestId, workspaceId, params) : ''
+      const blockedStart = guardStart ? checkFirstStart(scope, requestId, workspaceId, params, op === 'start-batch') : ''
       if (blockedStart) {
         send('chanshui.response', { id: requestId, ok: false, error: { message: `${blockedStart} 请回到新建检测后重新操作。本次没有发送问题。`, status: 409, operationResult: 'not_started' } })
         return
       }
       let warning: Record<string, unknown> | undefined
-      const value = await requestChanshui(message.op, params, workspaceId, controller.signal, value => { warning = value })
-      if (scope === generation) send('chanshui.response', { id: requestId, ok: true, value, ...(warning ? { warning } : {}) })
+      request.started = true
+      const value = await requestChanshui(op, params, workspaceId, controller.signal, value => { warning = value })
+      if (current()) send('chanshui.response', { id: requestId, ok: true, value, ...(warning ? { warning } : {}) })
     } catch (e) {
-      if (scope === generation) send('chanshui.response', { id: requestId, ok: false, error: { ...(e instanceof ChanshuiError ? e.details : {}), message: e instanceof Error ? e.message : '读取结果时中断，请重试读取。', status: e instanceof ChanshuiError ? e.status : 0 } })
-    } finally { if (scope === generation) requests.delete(requestId); if (priorityStop && stopGeneration === scope) stopGeneration = undefined }
+      if (current()) send('chanshui.response', { id: requestId, ok: false, error: { ...(e instanceof ChanshuiError ? e.details : {}), message: e instanceof Error ? e.message : '读取结果时中断，请重试读取。', status: e instanceof ChanshuiError ? e.status : 0 } })
+    } finally { releaseRequest(requestId, request) }
   }
-  if (priorityStop) void run()
+  if (priorityStop || priorityState) void run()
   else serial = serial.then(run, run)
 }
 const openSharedReport=()=>{const reportId=new URLSearchParams(window.location.search).get('detectorReport');if(props.workspaceId && reportId && /^[0-9a-f]{32}$/.test(reportId)) void launch(new CustomEvent(chanshuiOpenEvent,{detail:{reportId}}))}

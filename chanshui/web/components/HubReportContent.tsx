@@ -10,7 +10,7 @@ import ProbeTimeline from './ProbeTimeline';
 import HubQuestionDetails from './HubQuestionDetails';
 import { HubProbeEvidence } from './ProbeEvidence';
 import { hubReportView, itemJudgment, canRetryHubItem, hasOriginalItemDTO, isVerifiedHubReport, reportVersion } from '../lib/hub-report-view';
-import { isHubTerminal } from '../lib/hub-policy';
+import { isHubTerminal, reportFinishConfirmed } from '../lib/hub-policy';
 import { CROSS_UNKNOWN_ERROR, INJECTION_NOTE, usablePoints, type CrossView } from '../lib/hub-crosscheck';
 import { fingerprintState } from '../lib/report-view';
 import { boundaryReviewText, knowledgeDateComparison } from '../lib/knowledge-dates';
@@ -30,7 +30,10 @@ export default function HubReportContent({
   onRetry?: (ids: string[]) => void; retryDisabled?: boolean;
   itemsReadVersion: string; retryHold: boolean; readHold: boolean; onRefresh: (expectedReportId?: string) => Promise<void>;
 }) {
-  const view = hubReportView(report, items, complete, readFailed);
+  // An old persisted terminal status is not confirmation that this round exited or saved.
+  const confirmed = report.executionPhase ? reportFinishConfirmed(report) : isHubTerminal(report.status);
+  const presentationStatus = !confirmed && isHubTerminal(report.status) ? 'running' : report.status;
+  const view = hubReportView({...report, status: presentationStatus}, items, complete, readFailed);
   const verified = isVerifiedHubReport(report);
   const currentVersion = reportVersion(report);
   const singleAsk = object(report.summary).singleAsk === true;
@@ -39,7 +42,7 @@ export default function HubReportContent({
   // The saved total can arrive before the item judgments for this report version.
   const preserveTotalScore = Boolean(view.cacheView?.part?.applicable &&
     (!itemsReady || view.groups.cache?.some(item => itemJudgment(item).source === 'manual')));
-  const crossReady = !singleAsk && isHubTerminal(report.status) && !retryActive && !retryHold && !readHold && itemsReady;
+  const crossReady = !singleAsk && reportFinishConfirmed(report) && !retryActive && !retryHold && !readHold && itemsReady;
 
   const [cross, setCross] = useState<CrossState>({ version: '', op: 0, state: 'idle', attempts: 0 });
   const opSeq = useRef(0);
@@ -121,7 +124,7 @@ export default function HubReportContent({
   };
   const refreshingStale = manualRefresh && effective.state === 'stale' && !readHold && !retryHold;
   const crossView: CrossView =
-    !crossReady && !refreshingStale ? { phase: 'wait', wait: (!isHubTerminal(report.status) || retryActive || retryHold) ? 'H3' : 'H3b' }
+    !crossReady && !refreshingStale ? { phase: 'wait', wait: (!confirmed || retryActive || retryHold) ? 'H3' : 'H3b' }
     : effective.state === 'ok' ? { phase: 'ok', data: effective.data }
     : effective.state === 'error' ? { phase: 'error', error: effective.error }
     : effective.state === 'stale' ? { phase: 'stale' }
@@ -148,7 +151,7 @@ export default function HubReportContent({
     {loadingImages[id] && <p className="muted">正在读取本次已保存图片，不重新检测。</p>}
     {imageErrors[id] && <p className="error-box" role="alert">{imageErrors[id]}</p>}
   </>};
-  const knowledgeDetail=(id:string)=>{const item=items.find(x=>x.itemId===id || x.itemId==='knowledge:'+id);return item ? <HubQuestionDetails bodyOnly modelGroup={view.verdict.knowledge?.boundary_review?.method === 'model_group'} item={item} call={call} reportId={report.reportId} reportStatus={report.status} onRetry={onRetry} retryDisabled={retryDisabled} previous={Boolean(report.retry?.itemIds.includes(item.itemId)&&['queued','running'].includes(item.status))}/> : complete ? undefined : <p className="muted">正在读取本题已保存的详细结果，请稍候；不会重新检测。</p>};
+  const knowledgeDetail=(id:string)=>{const item=items.find(x=>x.itemId===id || x.itemId==='knowledge:'+id);return item ? <HubQuestionDetails bodyOnly modelGroup={view.verdict.knowledge?.boundary_review?.method === 'model_group'} item={item} call={call} reportId={report.reportId} reportStatus={presentationStatus} onRetry={onRetry} retryDisabled={retryDisabled} previous={Boolean(report.retry?.itemIds.includes(item.itemId)&&['queued','running'].includes(item.status))}/> : complete ? undefined : <p className="muted">正在读取本题已保存的详细结果，请稍候；不会重新检测。</p>};
   const questions: Record<string, ReactNode> = {};
   const retryRunning = ['queued','running'].includes(report.status);
   const activeKnowledgeRetry = retryRunning &&
@@ -195,7 +198,7 @@ export default function HubReportContent({
         <div className="question-list">{rows.map(item => {
           const samples = object(item.result?.evidence).samples;
           const previous = report.retry?.itemIds.includes(item.itemId) && ['queued', 'running'].includes(item.status) && Array.isArray(samples) && samples.length > 0;
-          return <HubQuestionDetails key={item.itemId} item={item} reportId={report.reportId} reportStatus={report.status}
+          return <HubQuestionDetails key={item.itemId} item={item} reportId={report.reportId} reportStatus={presentationStatus}
             call={call} onRetry={onRetry} onJudged={() => onRefresh(report.reportId)} retryDisabled={retryDisabled} previous={previous} verifiedScoring cacheEvidenceInline={item === inlineItem} />;
         })}</div>
       </>;
@@ -224,7 +227,7 @@ export default function HubReportContent({
         {pendingKnowledge && complete && !activeKnowledgeRetry && extra.some(item => ['queued', 'running'].includes(item.status)) &&
           <p className="muted">下面保留的是停止前保存的结果，未完成题目可按状态补测。</p>}
         {extra.map(item => <HubQuestionDetails key={item.itemId} item={item} modelGroup={modelGroup} call={call} reportId={report.reportId}
-          reportStatus={report.status} onRetry={onRetry} retryDisabled={retryDisabled}
+          reportStatus={presentationStatus} onRetry={onRetry} retryDisabled={retryDisabled}
           previous={activeKnowledgeRetry && Boolean(report.retry?.itemIds.includes(item.itemId) && ['queued', 'running'].includes(item.status))} />)}
         {waiting.length > 0 && <p className="muted">{modelGroup ? `另有 ${waiting.length} 道事件题等待处理，本轮只提问该型号的固定题组。` : `另有 ${waiting.length} 道候选事件题，检测会按回答决定是否提问，答完后显示在这里。`}</p>}
         {skipped.length > 0 && <details className="fold">
@@ -232,7 +235,7 @@ export default function HubReportContent({
           {skippedExplanation && <p className="muted">{skippedExplanation}</p>}
           <div className="question-list">
             {skipped.map(item => <HubQuestionDetails key={item.itemId} item={item} modelGroup={modelGroup} call={call}
-              reportId={report.reportId} reportStatus={report.status} />)}
+              reportId={report.reportId} reportStatus={presentationStatus} />)}
           </div>
         </details>}
       </>;
@@ -243,23 +246,23 @@ export default function HubReportContent({
       const compatible=rows.filter(item=>!hasOriginalItemDTO(item)&&!['not_asked','not_applicable'].includes(itemJudgment(item).status??''));
       const failed=rows.filter(item=>hasOriginalItemDTO(item)&&canRetryHubItem(item));
       questions[kind]=compatible.length > 0 || (onRetry && failed.length > 0) ? <div className="question-list">
-        {compatible.map(item=><HubQuestionDetails key={item.itemId} item={item} call={call} reportId={report.reportId} reportStatus={report.status} onRetry={onRetry} retryDisabled={retryDisabled} previous={Boolean(report.retry?.itemIds.includes(item.itemId)&&['queued','running'].includes(item.status))}/>)}
+        {compatible.map(item=><HubQuestionDetails key={item.itemId} item={item} call={call} reportId={report.reportId} reportStatus={presentationStatus} onRetry={onRetry} retryDisabled={retryDisabled} previous={Boolean(report.retry?.itemIds.includes(item.itemId)&&['queued','running'].includes(item.status))}/>)}
         {onRetry && failed.map(item=><div key={item.itemId}><button type="button" className="btn-secondary" disabled={retryDisabled} onClick={()=>onRetry([item.itemId])}>补测此项</button><p className="muted">只补测此失败项，成功结果保留；可能产生费用，结果更新到本报告，不修改主站。</p></div>)}
       </div> : null;
       continue;
     }
 
-    const folds = rows.map((item, index) => <HubQuestionDetails key={report.reportId + ':' + item.itemId} item={item} reportId={report.reportId} reportStatus={report.status} call={call} number={kind === 'iq' ? index + 1 : undefined} onRetry={onRetry} retryDisabled={retryDisabled} onJudged={onRefresh} verifiedScoring={verified} previous={Boolean(report.retry?.itemIds.includes(item.itemId) && ['queued', 'running'].includes(item.status))} />);
+    const folds = rows.map((item, index) => <HubQuestionDetails key={report.reportId + ':' + item.itemId} item={item} reportId={report.reportId} reportStatus={presentationStatus} call={call} number={kind === 'iq' ? index + 1 : undefined} onRetry={onRetry} retryDisabled={retryDisabled} onJudged={onRefresh} verifiedScoring={verified} previous={Boolean(report.retry?.itemIds.includes(item.itemId) && ['queued', 'running'].includes(item.status))} />);
     const originalQuestionItems = view.native && ['iq','vision'].includes(kind) && rows.every(item => typeof (item.result?.evidence as Record<string,unknown> | undefined)?.[kind==='vision'?'question':'id'] !== 'undefined');
     if(originalQuestionItems) continue;
-    if(view.native && kind==='iq' && view.verdict.iq) {customIQ=<>{rows.filter(item=>!('id' in ((item.result?.evidence as Record<string,unknown>)||{}))).map(item=><HubQuestionDetails key={item.itemId} item={item} reportId={report.reportId} reportStatus={report.status} call={call} onRetry={onRetry} retryDisabled={retryDisabled} onJudged={onRefresh} verifiedScoring={verified} />)}</>;continue;}
+    if(view.native && kind==='iq' && view.verdict.iq) {customIQ=<>{rows.filter(item=>!('id' in ((item.result?.evidence as Record<string,unknown>)||{}))).map(item=><HubQuestionDetails key={item.itemId} item={item} reportId={report.reportId} reportStatus={presentationStatus} call={call} onRetry={onRetry} retryDisabled={retryDisabled} onJudged={onRefresh} verifiedScoring={verified} />)}</>;continue;}
     questions[kind] = kind === 'iq'  ? <><p className="muted">点击题目查看本次题面、回答和判定；默认收起，不会重新检测或修改主站。</p>{folds}</> : <div className="question-list">{folds}</div>;
   }
   if (knowledgeComparison || sharedDate) {
     questions.knowledge = <><p className="muted" data-testid="knowledge-date-comparison">{[sharedDate,knowledgeComparison].filter(Boolean).join(" ")}</p>{questions.knowledge}</>;
   }
   const sectionContent: Record<string, ReactNode> = Object.fromEntries(Object.entries(view.messages).map(([key, text]) => [key, <p key={key} className="muted">{text}</p>]));
-  const ended = isHubTerminal(report.status);
+  const ended = confirmed;
   if (view.cacheView) {
     const part = view.cacheView.part;
     const totalVisible = typeof view.verdict.total?.score === 'number' && !view.totalLabel;
@@ -285,7 +288,7 @@ export default function HubReportContent({
   if(singleAsk){const item=items[0],raw=object(object(item?.result?.evidence).single_ask);return <>
     <section className="result-card"><h3>单问单答</h3><p className="muted">这是当前账号的一次独立问答，不计推理或总分；展开查看原问题、完整回答和用量，失败可在本记录补测。</p>
     {item && <details className="question" data-item-id={item.itemId}><summary><span>本次问题与回答</span><b>{item.status==='error'?'请求失败':ended?'已结束':'等待回答'}</b></summary><pre>{item.prompt}</pre>{item.result?.error && <p className="error-box" role="alert">{item.result.error}</p>}<SingleAnswer model={report.model} answer={Object.keys(raw).length?raw as Metrics:null} />{extras(item.itemId)}</details>}
-    </section><ProbeTimeline probes={view.probes} status={report.status} timing={view.verdict.timing||timing} progress={view.progress}/></>;
+    </section><ProbeTimeline probes={view.probes} status={presentationStatus} executionPhase={report.executionPhase} timing={view.verdict.timing||timing} progress={view.progress}/></>;
   }
   return <>
     {view.native && items.some(item=>item.status==='done'&&item.definition.judge.type!=='model_identity'&&!hasOriginalItemDTO(item)&&!['not_asked','not_applicable'].includes(itemJudgment(item).status??'')) && <p className="muted">本报告含自定义或旧格式结果，已保存回答可逐项展开；旧版未保存的原诊断不能补回，成功结果不会重新提问。</p>}
@@ -293,7 +296,7 @@ export default function HubReportContent({
     <HubCrossCheckCard cross={crossView} items={items} onRetry={retryCross} onRefresh={() => void refreshCross()} refreshing={manualRefresh} />
     <ResultCards verdict={view.native ? originalVerdict : view.verdict} model={report.model} loading={!ended} showCache={view.cacheView?.visible ?? Boolean(view.groups.cache)} savedScore={!view.native} preserveTotalScore={preserveTotalScore} totalLabel={view.totalLabel} questions={questions} sectionContent={sectionContent} questionExtra={view.native ? extras : undefined} onQuestionOpen={view.native ? id=>void openQuestion(id) : undefined} collapseVision={view.native} questionTail={customIQ} knowledgeExtra={knowledgeDetail} knowledgeAskLimit={knowledgeAskLimit}
       injectionNote={injection ? INJECTION_NOTE : undefined} injectionDetail={injection ? <HubInjectionDetail item={injection} cross={crossView} model={report.model} call={call} /> : undefined} />
-    <ProbeTimeline probes={view.probes} status={report.status} timing={view.native ? view.verdict.timing || timing : timing} progress={view.progress}>
+    <ProbeTimeline probes={view.probes} status={presentationStatus} executionPhase={report.executionPhase} timing={view.native ? view.verdict.timing || timing : timing} progress={view.progress}>
       {!report.model.toLowerCase().startsWith('claude-') && questions.thinking}
     </ProbeTimeline>
   </>;

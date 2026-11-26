@@ -493,8 +493,8 @@ describe('实际 HubApp 的读取、核查和补测', () => {
     await click(H5d)
     expect(s.count('report')).toBe(readsBefore + 1)
     await act(() => refreshed.resolve(s.report))
-    // The existing openReport finally advances pollEpoch and checks status again.
-    expect(s.count('report')).toBe(readsBefore + 2)
+    // The unified reader does not start a duplicate GET after openReport completes.
+    expect(s.count('report')).toBe(readsBefore + 1)
     expect(s.count('cross-check')).toBe(2)
     expect(text()).toContain('结论：D')
     expect(text()).not.toContain(H5c)
@@ -519,6 +519,7 @@ describe('实际 HubApp 的读取、核查和补测', () => {
   })
 
   it('重读报告失败后等待成功的新报告和题目才再次判读', async () => {
+    vi.useFakeTimers()
     const s = await bootApp()
     s.enqueue('cross-check', () => ({ ...s.data, reportUpdatedAtMs: -1 }))
     await openSidebarReport(s.report.reportId)
@@ -531,8 +532,10 @@ describe('实际 HubApp 的读取、核查和补测', () => {
     await click(H5d)
     expect(text()).toContain('隔离报告读取失败')
     expect(text()).toContain(H3b)
-    expect(s.count('report')).toBe(originalReads + 2)
+    expect(s.count('report')).toBe(originalReads + 1)
     expect(s.count('cross-check')).toBe(1)
+    await waitTime(1999); expect(s.count('report')).toBe(originalReads + 1)
+    await waitTime(1); expect(s.count('report')).toBe(originalReads + 2)
     s.report = { ...s.report, updatedAtMs: s.report.updatedAtMs! + 1 }
     s.data = { ...s.data, reportUpdatedAtMs: s.report.updatedAtMs! }
     await act(() => reread.resolve(s.report))

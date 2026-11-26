@@ -11,9 +11,11 @@ export default function ProbeTimeline({
   children,
   timing,
   progress,
+  executionPhase,
 }: {
   probes: Probe[];
   status: string;
+  executionPhase?: string;
   children?: ReactNode;
   timing?: DetectionTiming;
   progress?: { total: number | null; finished: number; statusTexts: Record<string, string>; unfinished: number; hasRequestFailure?: boolean; unconfirmedSelfReport?: boolean };
@@ -23,7 +25,7 @@ export default function ProbeTimeline({
   const finished = progress?.finished ?? probes.filter(
     (p) => !["queued", "running"].includes(p.status),
   ).length;
-  const active = ["queued", "running"].includes(status);
+  const active = executionPhase ? ["queued", "preparing", "running", "stopping"].includes(executionPhase) : ["queued", "running"].includes(status);
   const total = progress ? progress.total : probes.length;
   const ratio = total ? Math.min(1, finished / total) : 0;
   const partialTitle = progress?.hasRequestFailure || probes.some(probe => probe.status === "error")
@@ -31,7 +33,8 @@ export default function ProbeTimeline({
     : progress?.unconfirmedSelfReport
       ? tr("检测已结束，模型自报题尚未判分")
       : tr("检测已结束，部分项目未确认");
-  const title =
+  const phaseTitle: Record<string, string> = { preparing: '准备检测', stopping: '正在确认程序结束', saving_end: '正在保存结束状态', saving_cancel: '正在保存取消状态', paused: '异常暂停', unknown: '检测状态待确认' };
+  const title = (executionPhase && phaseTitle[executionPhase]) || (
     status === "queued"
       ? tr("任务已排队")
       : status === "running"
@@ -42,7 +45,7 @@ export default function ProbeTimeline({
             ? partialTitle
             : status === "interrupted"
               ? tr("检测已中断")
-              : tr("检测报告已生成");
+              : tr("检测报告已生成"));
   return (
     <section
       className={
@@ -54,7 +57,7 @@ export default function ProbeTimeline({
         <div>
           <span className={"timeline-symbol " + (active ? "is-working" : "")}>
             <Icon
-              name={active ? "spinner" : status === "done" ? "check" : "chart"}
+              name={active ? "spinner" : status === "done" && (!executionPhase || executionPhase === "ended") ? "check" : "chart"}
             />
           </span>
           <div>

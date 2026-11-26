@@ -26,7 +26,7 @@ beforeEach(() => {
 afterEach(async () => { await act(() => root.unmount()); dispose?.(); dispose = undefined; container.remove(); vi.restoreAllMocks(); vi.unstubAllGlobals() })
 
 async function boot(target: Record<string, unknown> = {}) {
-  const state = { report: restorationReport(), items: restorationItems(3), failRead: false, failAfterCancel: false, rejectStart: false, storedStart: false, holdContextResponse: false, releaseContextResponse: undefined as (() => void) | undefined, holdStart: false, holdStartResponse: false, releaseStartResponse: undefined as (() => void) | undefined, startProtocol: 'chat', releaseStart: undefined as (() => void) | undefined, calls: [] as { op: string; params: any }[] }
+  const state = { recoverable: false, report: restorationReport(), items: restorationItems(3), failRead: false, failAfterCancel: false, rejectStart: false, storedStart: false, holdContextResponse: false, releaseContextResponse: undefined as (() => void) | undefined, holdStart: false, holdStartResponse: false, releaseStartResponse: undefined as (() => void) | undefined, startProtocol: 'chat', releaseStart: undefined as (() => void) | undefined, calls: [] as { op: string; params: any }[] }
   const reply = (m: any) => window.dispatchEvent(new MessageEvent('message', { data: m, source: window, origin: location.origin }))
   const catalog = { workspaceId: 'workspace-a', groups: [
     { id: 'group-a', name: '同名组', accounts: [{ targetId: 'account-a', accountId: 'a', accountName: '账号甲', models: 'model-a', protocol: 'chat' }] },
@@ -38,7 +38,7 @@ async function boot(target: Record<string, unknown> = {}) {
     }
     state.calls.push({ op: m.op, params: m.params })
     let value: unknown = {}
-    if (m.op === 'runtime') value = { enabled: true, available: true, active: null }
+    if (m.op === 'runtime') value = { enabled: true, available: true, active: null, recoverable: state.recoverable, queueBlocked: state.recoverable, reason: state.recoverable ? '写入结束状态失败' : '' }
     if (m.op === 'settings') value = { timeoutSeconds: 120, totalTimeoutSeconds: 3600, concurrency: 32, maxOutputTokens: 4096, retries: 0, maxAttempts: 128, memoryLimitMiB: 256, revision: 1 }
     if (m.op === 'reports') value = { items: [state.report] }
     if (m.op === 'report') {
@@ -202,7 +202,7 @@ describe('检测执行入口与停止后的结果保持', () => {
     expect(s.releaseStart).toBeTypeOf('function')
     s.startProtocol = 'anthropic'
     await act(() => s.releaseStart?.()); await settle()
-    expect(container.textContent).toContain('分组健康名单中的检测协议已变化')
+    expect(container.textContent).toContain('当前名单中的检测协议已变化')
     expect(s.calls.some(c => c.op === 'start')).toBe(false)
     expect(container.querySelector('[aria-label="普通检测受理"]')).toBeNull()
   })
@@ -222,6 +222,9 @@ describe('检测执行入口与停止后的结果保持', () => {
   it('按相同报告编号重读失败也不清空已经显示的回答', async () => {
     const s = await boot(); await act(() => button(s.report.accountName).click()); await settle()
     s.failRead = true
+    const lookup = container.querySelector<HTMLInputElement>('#hub-report-id')!
+    expect(lookup.value).toBe(''); expect(lookup.closest('details')?.open).toBe(false)
+    await act(() => { lookup.closest('details')!.open = true; Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')!.set!.call(lookup, s.report.reportId); lookup.dispatchEvent(new Event('input', {bubbles:true})); });
     await act(() => (container.querySelector('form.report-lookup') as HTMLFormElement).requestSubmit()); await settle()
     expect(container.querySelector('.total-card')).toBeTruthy()
     expect(container.textContent).toContain('已保存回答1')
@@ -260,13 +263,18 @@ describe('检测执行入口与停止后的结果保持', () => {
     expect(container.textContent).not.toContain('检测程序已退出')
     expect(button('取消等待')).toBeTruthy()
   })
-  it('停止后保存状态失败仍保留再次停止并重试保存的入口', async () => {
+  it('停止后保存状态失败仍保留只重试保存的入口，不重复停止或检测', async () => {
     const s = await boot()
-    Object.assign(s.report, { status: 'running', processExited: true, stopRequested: true, diagnostic: '程序已退出，但报告状态尚未保存，请重试保存。' })
+    Object.assign(s.report, { status: 'running', processExited: true, stopRequested: true, executionPhase: 'paused', finishConfirmed: false, recoveryReason: '程序已退出，但报告状态尚未保存，请重试保存。' }); s.recoverable = true
     await act(() => button(s.report.accountName).click()); await settle()
-    const retry = button('停止检测并重试保存状态')
+    await act(() => button('核查运行状态').click()); await settle()
+    const retry = button('核查并重试保存')
     expect(retry).toBeTruthy(); expect(retry.disabled).toBe(false)
+    expect(button('停止检测')).toBeUndefined()
     expect(container.textContent).toContain('已保存回答1')
+    await act(() => retry.click()); await settle()
+    expect(s.calls.filter(c => c.op === 'recover-runtime')).toHaveLength(1)
+    expect(s.calls.some(c => c.op === 'cancel')).toBe(false)
     expect(s.calls.some(c => c.op === 'start')).toBe(false)
   })
 })

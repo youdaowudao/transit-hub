@@ -136,6 +136,7 @@ func TestRetryLostAcceptanceRecoversOriginalWithoutExecutingOrCreating(t *testin
 	if _, e := s.Retry(t.Context(), o, id, input); e == nil {
 		t.Fatal("lost acceptance was treated as confirmed")
 	}
+	waitRecovery(t, func() bool { s.mu.Lock(); defer s.mu.Unlock(); return len(s.blocked) == 0 && !s.recoveryRunning })
 	if _, e := s.Retry(t.Context(), o, id, input); e != nil {
 		t.Fatal("same operation cannot inspect recovered state", e)
 	}
@@ -165,8 +166,9 @@ func TestRetryUnconfirmedReadPausesExistingQueueAndCanRecover(t *testing.T) {
 	f.mu.Lock()
 	f.readBlocked = false
 	f.mu.Unlock()
+	waitRecovery(t, func() bool { s.mu.Lock(); defer s.mu.Unlock(); return len(s.blocked) == 0 && !s.recoveryRunning })
 	if _, e := s.Retry(t.Context(), o, id, input); e != nil {
-		t.Fatal("same operation cannot recover", e)
+		t.Fatal("same operation cannot inspect automatically recovered state", e)
 	}
 	s.mu.Lock()
 	blocked = len(s.blocked)

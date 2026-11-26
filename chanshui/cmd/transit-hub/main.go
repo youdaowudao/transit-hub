@@ -228,6 +228,44 @@ func query(ctx context.Context, s *store.Store, env wire.Envelope, c wire.Contin
 		}
 		v, e := s.JudgeItem(ctx, o, a, engine.RescoreSummary)
 		return store.ReportView(v), "", e
+	case "create-batch":
+		var a struct {
+			Request store.BatchRequest  `json:"request"`
+			Targets []store.BatchTarget `json:"targets"`
+		}
+		if e := decode(env.Args, &a); e != nil {
+			return nil, "", e
+		}
+		v, e := s.CreateBatch(ctx, o, a.Request, a.Targets)
+		return v, "", e
+	case "read-batch":
+		var a store.BatchFilters
+		if e := decode(env.Args, &a); e != nil {
+			return nil, "", e
+		}
+		if a.Request != nil {
+			v, e := s.CheckBatchRequest(ctx, o, a.BatchID, *a.Request)
+			return v, "", e
+		}
+		v, e := s.ReadBatch(ctx, o, a)
+		return v, "", e
+	case "list-batches":
+		var a store.Filters
+		if e := decode(env.Args, &a); e != nil {
+			return nil, "", e
+		}
+		v, e := s.ListBatches(ctx, o, a)
+		return v, "", e
+	case "interrupt-batch-unstarted":
+		var a struct {
+			BatchID          string `json:"batchId"`
+			MayFinalizeBatch bool   `json:"mayFinalizeBatch"`
+		}
+		if e := decode(env.Args, &a); e != nil {
+			return nil, "", e
+		}
+		v, e := s.InterruptBatchUnstarted(ctx, o, a.BatchID, a.MayFinalizeBatch)
+		return v, "", e
 	case "create-report":
 		var a store.CreateRequest
 		if e := decode(env.Args, &a); e != nil {
@@ -327,25 +365,27 @@ func query(ctx context.Context, s *store.Store, env wire.Envelope, c wire.Contin
 		return v, "image/png", e
 	case "cancel-queued":
 		var a struct {
-			ReportID string `json:"reportId"`
+			ReportID         string `json:"reportId"`
+			MayFinalizeBatch bool   `json:"mayFinalizeBatch"`
 		}
 		if e := decode(env.Args, &a); e != nil {
 			return nil, "", e
 		}
-		if e := s.CancelQueued(ctx, o, a.ReportID); e != nil {
+		if e := s.CancelQueued(ctx, o, a.ReportID, a.MayFinalizeBatch); e != nil {
 			return nil, "", e
 		}
 		v, e := s.Report(ctx, o, a.ReportID)
 		return store.ReportView(v), "", e
 	case "finish-interrupted":
 		var a struct {
-			ReportID string         `json:"reportId"`
-			Error    map[string]any `json:"error"`
+			ReportID         string         `json:"reportId"`
+			Error            map[string]any `json:"error"`
+			MayFinalizeBatch bool           `json:"mayFinalizeBatch"`
 		}
 		if e := decode(env.Args, &a); e != nil {
 			return nil, "", e
 		}
-		if e := s.FinishInterrupted(ctx, o, a.ReportID, a.Error); e != nil {
+		if e := s.FinishInterrupted(ctx, o, a.ReportID, a.Error, a.MayFinalizeBatch); e != nil {
 			return nil, "", e
 		}
 		v, e := s.Report(ctx, o, a.ReportID)

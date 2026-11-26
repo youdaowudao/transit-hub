@@ -1,8 +1,10 @@
 package chanshui
 
 import (
+	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -12,6 +14,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"transithub/backend/internal/modules/connection_health"
 	"transithub/backend/internal/shared/authctx"
 )
 
@@ -129,9 +132,65 @@ func (s *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		s.bankInfo(w, r)
 		return
 	}
-	if err = s.ensureInitialized(r.Context()); err != nil {
-		fail(w, err)
+	// Known active Cancel must bypass initialization and the independent query
+	// slot so a retained helper cannot block the original Job.Stop.
+	if len(parts) == 3 && parts[0] == "reports" && parts[2] == "cancel" && r.Method == http.MethodPost {
+		var input struct {
+			ExpectedRetryID string `json:"expectedRetryId"`
+		}
+		if r.ContentLength != 0 {
+			if e := decode(r, &input); e != nil {
+				fail(w, e)
+				return
+			}
+		}
+		result, e := s.CancelRound(r.Context(), owner, parts[1], input.ExpectedRetryID)
+		if e != nil {
+			fail(w, e)
+			return
+		}
+		reply(w, 200, result)
 		return
+	}
+	if path == "runtime/recover" && r.Method == http.MethodPost {
+		if r.ContentLength != 0 {
+			var input struct{}
+			if e := decode(r, &input); e != nil {
+				fail(w, e)
+				return
+			}
+		}
+		result, e := s.RecoverRuntime(r.Context(), owner)
+		if e != nil {
+			fail(w, e)
+			return
+		}
+		reply(w, 202, result)
+		return
+	}
+	if path == "batches" && r.Method == http.MethodPost {
+		var input BatchInput
+		if e := decode(r, &input); e != nil {
+			fail(w, e)
+			return
+		}
+		result, e := s.StartBatch(r.Context(), owner, input)
+		if e != nil {
+			fail(w, e)
+			return
+		}
+		reply(w, 202, result)
+		return
+	}
+	// Admission methods include initialization in their one 30-second budget.
+	if !(path == "reports" && r.Method == http.MethodPost || len(parts) == 3 && parts[0] == "reports" && parts[2] == "retry" && r.Method == http.MethodPost && r.URL.Query().Get("action") != "judge-item") {
+		initCtx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
+		err = s.ensureInitialized(initCtx)
+		cancel()
+		if err != nil {
+			fail(w, s.withQueryStatus(owner, err))
+			return
+		}
 	}
 	if path == "reference-info" && r.Method == http.MethodGet {
 		data, e := s.queryJSON(r.Context(), "reference-info", owner, map[string]any{}, nil, false)
@@ -143,6 +202,44 @@ func (s *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if path == "targets" && r.Method == http.MethodGet {
+		for _, parameter := range strings.Split(r.URL.RawQuery, "&") {
+			name, _, _ := strings.Cut(parameter, "=")
+			name, err := url.QueryUnescape(name)
+			if err != nil || name != "catalog" {
+				continue
+			}
+			query, err := url.ParseQuery(r.URL.RawQuery)
+			values := query["catalog"]
+			if err != nil || len(values) != 1 || values[0] != "1" {
+				fail(w, problem(422, "input", "读取分组账号的选项不正确，请重新打开模型检测后更新名单；本次没有开始检测"))
+				return
+			}
+			reader, ok := s.targets.(interface {
+				ListAuditCatalog(context.Context, string, string) (connection_health.AuditCatalog, error)
+			})
+			if !ok {
+				fail(w, problem(503, "catalog", "当前后端版本不能读取独立分组账号名单，请完成整站升级后重试；没有开始检测"))
+				return
+			}
+			catalog, e := reader.ListAuditCatalog(r.Context(), owner.UserID, owner.WorkspaceID)
+			if e != nil {
+				status := 503
+				message := "读取分组和账号失败，后端没有返回可安全展示的具体原因，请检查本次名单读取的后端日志后重试；没有开始检测"
+				var detail *connection_health.AuditCatalogError
+				if errors.As(e, &detail) {
+					status = detail.Status
+					message = detail.Message
+				}
+				fail(w, problem(status, "catalog", message))
+				return
+			}
+			if catalog.WorkspaceID != owner.WorkspaceID {
+				fail(w, problem(409, "catalog", "返回的分组账号名单与这次工作区不一致，请重新选择工作区后重试；本次没有返回名单或开始检测"))
+				return
+			}
+			reply(w, 200, map[string]any{"catalog": catalog})
+			return
+		}
 		items, e := s.targets.ListAuditTargets(r.Context(), owner.UserID)
 		if e != nil {
 			fail(w, problem(503, "account", e.Error()))
@@ -278,17 +375,17 @@ func (s *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		reply(w, 202, result)
 		return
 	}
-	if len(parts) == 3 && parts[0] == "reports" && parts[2] == "cancel" && r.Method == http.MethodPost {
-		var input struct {
-			ExpectedRetryID string `json:"expectedRetryId"`
+	args, e := filters(r.URL.Query())
+	if e != nil {
+		fail(w, e)
+		return
+	}
+	if path == "batches" && r.Method == http.MethodGet {
+		if e = reportDates(args); e != nil {
+			fail(w, e)
+			return
 		}
-		if r.ContentLength != 0 {
-			if e := decode(r, &input); e != nil {
-				fail(w, e)
-				return
-			}
-		}
-		result, e := s.CancelRound(r.Context(), owner, parts[1], input.ExpectedRetryID)
+		result, e := s.ListBatches(r.Context(), owner, args)
 		if e != nil {
 			fail(w, e)
 			return
@@ -296,28 +393,56 @@ func (s *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		reply(w, 200, result)
 		return
 	}
-	args, e := filters(r.URL.Query())
-	if e != nil {
-		fail(w, e)
+	if len(parts) == 2 && parts[0] == "batches" && r.Method == http.MethodGet {
+		if value, ok := args["offset"].(string); ok {
+			offset, e := strconv.Atoi(value)
+			if e != nil || offset < 0 || offset > 32 {
+				fail(w, problem(422, "batch", "批次页位置无效，请重新选择筛选条件"))
+				return
+			}
+			args["offset"] = offset
+		}
+		for k := range args {
+			switch k {
+			case "offset", "limit", "targetId", "model", "status", "view":
+			default:
+				fail(w, problem(422, "batch", "批次读取筛选条件无效，请重新选择"))
+				return
+			}
+		}
+		result, e := s.ReadBatch(r.Context(), owner, parts[1], args)
+		if e != nil {
+			fail(w, e)
+			return
+		}
+		reply(w, 200, result)
 		return
 	}
 	operation := ""
 	switch {
 	case path == "reports" && r.Method == http.MethodGet:
 		operation = "list-reports"
+		if v, ok := args["reportType"]; ok && v != "all" && v != "single" {
+			fail(w, problem(422, "report", "报告类型筛选无效"))
+			return
+		}
 		if e = reportDates(args); e != nil {
 			fail(w, e)
 			return
 		}
 	case len(parts) == 2 && parts[0] == "reports" && r.Method == http.MethodGet:
+		before := s.captureRuntime(owner)
 		data, e := s.queryJSON(r.Context(), "read-report", owner, map[string]any{"reportId": parts[1]}, nil, false)
 		if e != nil {
 			fail(w, e)
 			return
 		}
-		var result map[string]any
-		_ = json.Unmarshal(data, &result)
-		s.decorateReport(owner, parts[1], result)
+		result, e := decodeReport(data, parts[1])
+		if e != nil {
+			fail(w, e)
+			return
+		}
+		s.decorateReadReport(owner, parts[1], result, before)
 		reply(w, 200, result)
 		return
 	case len(parts) == 3 && parts[0] == "reports" && parts[2] == "cross-check" && r.Method == http.MethodGet:
@@ -383,7 +508,7 @@ func (s *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	response, e := s.runner.Query(r.Context(), Envelope{V: 1, Operation: operation, Owner: owner, Args: args}, nil, false)
 	if e != nil {
-		fail(w, e)
+		fail(w, s.withQueryStatus(owner, e))
 		return
 	}
 	writeStreamResult(w, response, operation)

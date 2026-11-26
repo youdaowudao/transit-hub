@@ -11,7 +11,7 @@ import (
 	"github.com/kiss-kedaya/chanshui/internal/knowledge"
 )
 
-const schemaVersion = 7
+const schemaVersion = 8
 
 func (s *Store) migrate(ctx context.Context) error {
 	conn, err := s.db.Conn(ctx)
@@ -82,7 +82,19 @@ func (s *Store) migrate(ctx context.Context) error {
 			}
 		}
 	}
-	if _, err = conn.ExecContext(ctx, "PRAGMA user_version=7"); err != nil {
+	if version < 8 {
+		for _, stmt := range []string{
+			`CREATE TABLE hub_batches(batch_id TEXT PRIMARY KEY,user_id TEXT NOT NULL,workspace_id TEXT NOT NULL,created_at_ms INTEGER NOT NULL,first_finished_at_ms INTEGER NOT NULL DEFAULT 0,request_json TEXT NOT NULL CHECK(json_valid(request_json)))`,
+			`CREATE INDEX hub_batches_owner_date ON hub_batches(user_id,workspace_id,created_at_ms DESC,batch_id DESC)`,
+			`ALTER TABLE hub_reports ADD COLUMN batch_id TEXT REFERENCES hub_batches(batch_id)`,
+			`CREATE INDEX hub_reports_owner_batch ON hub_reports(user_id,workspace_id,batch_id)`,
+		} {
+			if _, err = conn.ExecContext(ctx, stmt); err != nil {
+				return migrationFailure(err)
+			}
+		}
+	}
+	if _, err = conn.ExecContext(ctx, "PRAGMA user_version=8"); err != nil {
 		return migrationFailure(err)
 	}
 	if _, err = conn.ExecContext(ctx, "COMMIT"); err != nil {

@@ -195,6 +195,17 @@ func waitQueue(t *testing.T, condition func() bool) {
 	}
 	t.Fatal("queue condition timed out")
 }
+func waitRecovery(t *testing.T, condition func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if condition() {
+			return
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+	t.Fatal("recovery condition timed out")
+}
 func nextStarted(t *testing.T, f *queueFixtureExecutor, want string) {
 	t.Helper()
 	select {
@@ -299,9 +310,15 @@ func TestQueueCancelWriteFailureKeepsPositionAndBlocksAdvance(t *testing.T) {
 	f.mu.Lock()
 	f.cancelFailure = b.ReportID
 	f.mu.Unlock()
-	if _, err := s.Cancel(t.Context(), o, b.ReportID); err == nil {
-		t.Fatal("failed save reported cancellation")
+	result, err := s.Cancel(t.Context(), o, b.ReportID)
+	if err != nil || result.(map[string]any)["executionPhase"] != "saving_cancel" || result.(map[string]any)["finishConfirmed"] != false {
+		t.Fatalf("cancel acceptance falsely reported completed: %v %v", result, err)
 	}
+	waitQueue(t, func() bool {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		return s.blocked[reportKey{o, b.ReportID}] != nil && strings.Contains(s.blocked[reportKey{o, b.ReportID}].RecoveryReason, "模拟取消写失败")
+	})
 	s.mu.Lock()
 	kept := len(s.waiting) == 1 && s.waiting[0].Input.ReportID == b.ReportID
 	s.mu.Unlock()
@@ -309,17 +326,17 @@ func TestQueueCancelWriteFailureKeepsPositionAndBlocksAdvance(t *testing.T) {
 		t.Fatal("failed cancellation dropped queued report")
 	}
 	f.release(a.ReportID, true)
-	waitQueue(t, func() bool { s.mu.Lock(); defer s.mu.Unlock(); return s.active == nil })
+	waitRecovery(t, func() bool { s.mu.Lock(); defer s.mu.Unlock(); return s.active == nil && !s.recoveryRunning })
 	f.mu.Lock()
 	if len(f.order) != 1 {
 		t.Fatal("blocked queue advanced")
 	}
 	f.cancelFailure = ""
 	f.mu.Unlock()
-	result, err := s.Cancel(t.Context(), o, b.ReportID)
-	if err != nil || result.(map[string]any)["status"] != "cancelled" {
-		t.Fatal(result, err)
+	if _, err := s.RecoverRuntime(t.Context(), o); err != nil {
+		t.Fatal(err)
 	}
+	waitRecovery(t, func() bool { s.mu.Lock(); defer s.mu.Unlock(); return len(s.blocked) == 0 && !s.recoveryRunning })
 	if f.status(b.ReportID) != "cancelled" {
 		t.Fatal("cancellation not saved")
 	}
@@ -404,7 +421,7 @@ func TestQueueCommittedCreateResponseLostNeverLeavesOrReplaysQueuedOrphan(t *tes
 		t.Fatal("fixture did not commit creation before failure")
 	}
 	f.release(a.ReportID, true)
-	waitQueue(t, func() bool { s.mu.Lock(); defer s.mu.Unlock(); return s.active == nil })
+	waitRecovery(t, func() bool { s.mu.Lock(); defer s.mu.Unlock(); return s.active == nil && !s.recoveryRunning })
 	if _, err := s.Start(t.Context(), o, queueInput("c")); err == nil {
 		t.Fatal("unconfirmed queue was allowed to advance")
 	}
@@ -414,11 +431,11 @@ func TestQueueCommittedCreateResponseLostNeverLeavesOrReplaysQueuedOrphan(t *tes
 	f.mu.Lock()
 	f.finishFailure = ""
 	f.mu.Unlock()
-	result, err := s.Cancel(t.Context(), o, b.ReportID)
-	if err != nil || result.(map[string]any)["status"] != "interrupted" {
-		t.Fatal(result, err)
+	if _, err := s.RecoverRuntime(t.Context(), o); err != nil {
+		t.Fatal(err)
 	}
-	if _, err = s.Start(t.Context(), o, b); err != nil {
+	waitRecovery(t, func() bool { s.mu.Lock(); defer s.mu.Unlock(); return len(s.blocked) == 0 && !s.recoveryRunning })
+	if _, err := s.Start(t.Context(), o, b); err != nil {
 		t.Fatal(err)
 	}
 	f.mu.Lock()
@@ -437,6 +454,10 @@ func TestQueueUnknownQueuedReplayIsInterruptedWithoutPaidRun(t *testing.T) {
 	f.owners[a.ReportID] = o
 	f.requests[a.ReportID] = a
 	f.mu.Unlock()
+	if _, err := s.Start(t.Context(), o, a); err == nil || asProblem(err).Status != 503 {
+		t.Fatalf("underegistered creation not reported: %v", err)
+	}
+	waitRecovery(t, func() bool { return f.status(a.ReportID) == "interrupted" })
 	result, err := s.Start(t.Context(), o, a)
 	if err != nil || result.(map[string]any)["status"] != "interrupted" {
 		t.Fatal(result, err)
@@ -537,6 +558,11 @@ func TestQueuePreparationCancellationSaveFailureCannotReleaseNextReport(t *testi
 	if err := <-finished; err != nil {
 		t.Fatal(err)
 	}
+	waitQueue(t, func() bool {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		return s.active != nil && !s.active.Preparing && strings.Contains(s.active.RecoveryReason, "模拟取消写失败")
+	})
 	s.mu.Lock()
 	kept := s.active != nil && s.active.ReportID == a.ReportID && !s.active.Preparing && len(s.waiting) == 1
 	s.mu.Unlock()
@@ -549,14 +575,9 @@ func TestQueuePreparationCancellationSaveFailureCannotReleaseNextReport(t *testi
 	}
 	f.cancelFailure = ""
 	f.mu.Unlock()
-	if _, err := s.Cancel(t.Context(), o, a.ReportID); err != nil {
-		t.Fatal(err)
-	}
-	if f.status(a.ReportID) != "cancelled" {
-		t.Fatal("retry did not save cancelled status")
-	}
+	waitRecovery(t, func() bool { return f.status(a.ReportID) == "cancelled" })
 	// The next report may enter preparation only after the prior cancellation saved.
-	waitQueue(t, func() bool {
+	waitRecovery(t, func() bool {
 		s.mu.Lock()
 		defer s.mu.Unlock()
 		return s.active != nil && s.active.ReportID == b.ReportID

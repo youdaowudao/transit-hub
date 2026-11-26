@@ -149,6 +149,7 @@ func TestStrictRecoveryCompletedReportAllowsSecondTask(t *testing.T) {
 	if _, err := s.Start(t.Context(), owner, second); err != nil {
 		t.Fatalf("normal SQL completion did not release old task: %v", err)
 	}
+	waitRecovery(t, func() bool { s.mu.Lock(); defer s.mu.Unlock(); return s.active == nil && !s.recoveryRunning })
 	storeMu.Lock()
 	defer storeMu.Unlock()
 	if f.starts.Load() != 2 || statuses[first.ReportID] != "done" || statuses[second.ReportID] != "done" {
@@ -187,8 +188,8 @@ func TestServiceMapsConfiguredAnthropicAuthentication(t *testing.T) {
 			targets.auth = item.source
 			input := startInput()
 			input.ExpectedContext.Protocol = "anthropic"
-			var actual Credential
-			f.onStart = func(_ Envelope, cred Credential) { actual = cred }
+			received := make(chan Credential, 1)
+			f.onStart = func(_ Envelope, cred Credential) { received <- cred }
 			f.fn = func(e Envelope) (any, error) {
 				switch e.Operation {
 				case "read-report":
@@ -208,6 +209,12 @@ func TestServiceMapsConfiguredAnthropicAuthentication(t *testing.T) {
 					t.Fatal("unknown or missing Messages authentication guessed instead of rejected")
 				}
 				return
+			}
+			var actual Credential
+			select {
+			case actual = <-received:
+			case <-time.After(time.Second):
+				t.Fatal("accepted task did not start")
 			}
 			if err != nil || actual.AnthropicAuth != item.want || actual.Protocol != "anthropic" {
 				t.Fatalf("configured authentication mapping failed: source=%s received=%s err=%v", item.source, actual.AnthropicAuth, err)
@@ -328,6 +335,7 @@ func TestAcceptedResponseLostReplayNeverCreatesSecondRun(t *testing.T) {
 	if _, err := s.Start(t.Context(), Owner{"user-a", "workspace-a"}, input); err != nil {
 		t.Fatal(err)
 	}
+	waitRecovery(t, func() bool { s.mu.Lock(); defer s.mu.Unlock(); return s.active == nil && !s.recoveryRunning })
 	resolvedBeforeReplay := targets.calls.Load()
 	if _, err := s.Start(t.Context(), Owner{"user-a", "workspace-a"}, input); err != nil {
 		t.Fatal(err)
@@ -361,6 +369,7 @@ func TestStartCreatesSnapshotAndUsesServerCredential(t *testing.T) {
 	if _, err := s.Start(t.Context(), Owner{"user-a", "workspace-a"}, startInput()); err != nil {
 		t.Fatal(err)
 	}
+	waitRecovery(t, func() bool { s.mu.Lock(); defer s.mu.Unlock(); return s.active == nil && !s.recoveryRunning })
 	if f.starts.Load() != 1 || targets.calls.Load() != 2 {
 		t.Fatal("expected one accepted task with admission and execution-time account checks")
 	}
@@ -408,7 +417,7 @@ func TestOtherWorkspaceRuntimeHidesAccountAndReport(t *testing.T) {
 	s, _, _ := fixture(t)
 	s.active = &activeTask{Owner: Owner{"other", "private"}, ReportID: "private-report", AccountName: "private-account"}
 	result := mustJSON(s.runtime(t.Context(), Owner{"user-a", "workspace-a"}))
-	if strings.Contains(result, "private") || strings.Contains(result, `"busy":true`) || !strings.Contains(result, "可以加入等待") {
+	if strings.Contains(result, "private") || strings.Contains(result, `"busy":true`) || !strings.Contains(result, "当前有其他检测正在执行") {
 		t.Fatalf("other owner leaked: %s", result)
 	}
 }
@@ -612,6 +621,7 @@ func TestCreateResponseLostRecoversCommittedQueuedReportWithoutModel(t *testing.
 		}
 	}
 	_, err := s.Start(t.Context(), Owner{"user-a", "workspace-a"}, startInput())
+	waitRecovery(t, func() bool { s.mu.Lock(); defer s.mu.Unlock(); return len(s.blocked) == 0 && !s.recoveryRunning })
 	if err == nil || status != "interrupted" || s.active != nil || f.starts.Load() != 0 {
 		t.Fatalf("lost create response left report=%s active=%v starts=%d err=%v", status, s.active != nil, f.starts.Load(), err)
 	}

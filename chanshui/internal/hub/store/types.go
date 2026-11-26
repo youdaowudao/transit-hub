@@ -117,6 +117,7 @@ type Snapshot struct {
 }
 type Summary struct {
 	ReportID    string          `json:"reportId"`
+	BatchID     string          `json:"batchId,omitempty"`
 	TargetID    string          `json:"targetId"`
 	AccountID   string          `json:"accountId"`
 	AccountName string          `json:"accountName"`
@@ -134,12 +135,13 @@ type Summary struct {
 type Report struct {
 	Retry *Retry `json:"retry,omitempty"`
 	Summary
-	StartedAtMs         int64           `json:"startedAtMs"`
-	Request             json.RawMessage `json:"request"`
-	Settings            Settings        `json:"settings"`
-	ItemCounts          map[string]int  `json:"itemCounts"`
-	MemoryLimitMiB      int             `json:"memoryLimitMiB"`
-	TotalTimeoutSeconds int             `json:"totalTimeoutSeconds"`
+	BatchFirstFinishedAtMs int64           `json:"batchFirstFinishedAtMs,omitempty"`
+	StartedAtMs            int64           `json:"startedAtMs"`
+	Request                json.RawMessage `json:"request"`
+	Settings               Settings        `json:"settings"`
+	ItemCounts             map[string]int  `json:"itemCounts"`
+	MemoryLimitMiB         int             `json:"memoryLimitMiB"`
+	TotalTimeoutSeconds    int             `json:"totalTimeoutSeconds"`
 }
 type Item struct {
 	ItemID                string               `json:"itemId"`

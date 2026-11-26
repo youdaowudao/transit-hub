@@ -140,14 +140,20 @@ func (m *systemManager) checkSlice(ctx context.Context) (err error) {
 	if _, err := os.Stat("/sys/fs/cgroup/cgroup.controllers"); err != nil {
 		return fmt.Errorf("当前环境没有cgroup v2，不能启用服务器硬内存限制")
 	}
-	unitLifecycle.Lock()
+	if err := lockContext(ctx, &unitLifecycle); err != nil {
+		return err
+	}
 	defer unitLifecycle.Unlock()
 	created := false
 	defer func() {
 		if err == nil {
 			return
 		}
-		cleanup, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		deadline := time.Now().Add(3 * time.Second)
+		if work, ok := ctx.Deadline(); ok && work.Add(10*time.Second).Before(deadline) {
+			deadline = work.Add(10 * time.Second)
+		}
+		cleanup, cancel := context.WithDeadline(context.Background(), deadline)
 		defer cancel()
 		if created {
 			err = errors.Join(err, m.stopEmptySlice(cleanup, ""))
@@ -234,7 +240,9 @@ func (m *systemManager) start(ctx context.Context, name, role string, cfg Runner
 	if seconds < 1 || seconds > maxTaskSeconds {
 		return fmt.Errorf("检测运行时限超出支持范围，未启动进程；请使用1～9223371976秒")
 	}
-	unitLifecycle.Lock()
+	if err := lockContext(ctx, &unitLifecycle); err != nil {
+		return err
+	}
 	defer unitLifecycle.Unlock()
 	props := []unitProperty{
 		{"Description", dbus.MakeVariant("TransitHub isolated model detection")}, {"Type", dbus.MakeVariant("exec")},
@@ -350,12 +358,17 @@ func (m *systemManager) kill(ctx context.Context, name string) error {
 	}
 	return m.call(ctx, "KillUnit", name, "all", int32(9)).Err
 }
-func (m *systemManager) release(name string) (err error) {
-	unitLifecycle.Lock()
-	defer unitLifecycle.Unlock()
+func (m *systemManager) release(name string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
+	return m.releaseContext(ctx, name)
+}
+func (m *systemManager) releaseContext(ctx context.Context, name string) (err error) {
 	defer func() { err = errors.Join(err, m.conn.Close()) }()
+	if err = lockContext(ctx, &unitLifecycle); err != nil {
+		return err
+	}
+	defer unitLifecycle.Unlock()
 	if name != "" {
 		_ = m.call(ctx, "UnrefUnit", name).Err
 		_ = m.call(ctx, "ResetFailedUnit", name).Err

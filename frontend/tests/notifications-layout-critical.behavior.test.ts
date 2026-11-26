@@ -21,7 +21,7 @@ vi.mock('@/modules/admin/composables/useAdminAccounts', async () => {
   const { ref } = await import('vue')
   harness.current = ref({ id: 'workspace-a', displayName: '隔离工作区', platform: 'sub2api', identity: 'fixture' })
   harness.switching = ref(false)
-  return { useAdminAccounts: () => ({ currentAccount: harness.current, isSwitching: harness.switching, isDeleting: ref(false), noticeKey: ref(''), loadCurrentAccount: vi.fn(async () => true) }) }
+  return { useAdminAccounts: () => ({ currentAccount: harness.current, isCurrentAccountSession: (id: string) => harness.current?.value?.id === id, isSwitching: harness.switching, isDeleting: ref(false), noticeKey: ref(''), loadCurrentAccount: vi.fn(async () => true) }) }
 })
 vi.mock('@/modules/admin/api/notifications', async importOriginal => ({
   ...await importOriginal<typeof import('@/modules/admin/api/notifications')>(),

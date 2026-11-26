@@ -5274,3 +5274,24 @@ html[data-mode="dark"] .agent-onboard-tip {
 .knowledge-ladder .knowledge-answer .score-chip { display: inline-block; margin-inline-start: 8px; }
 .knowledge-ladder .knowledge-answer > summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 .knowledge-ladder .knowledge-answer > pre { white-space: pre-wrap; overflow-wrap: anywhere; }
+
+/* Batch detection uses the existing report surface and controls. */
+.hub-create-mode { margin: 16px 0; }
+.hub-batch-fieldset { border: 0; padding: 0; margin: 0; min-width: 0; }
+.hub-batch-fieldset[disabled] { opacity: .7; }
+.hub-batch-account { border: 1px solid var(--line); border-radius: 10px; padding: 14px; margin: 12px 0; }
+.hub-batch-account .hub-sections { margin: 12px 0; }
+.hub-batch-counts { display: grid; grid-template-columns: repeat(auto-fit, minmax(110px, 1fr)); gap: 12px; margin: 18px 0; }
+.hub-batch-counts div { border: 1px solid var(--line); border-radius: 8px; padding: 12px; }
+.hub-batch-counts dt { font-size: 13px; color: var(--muted); }
+.hub-batch-counts dd { margin: 4px 0 0; font-size: 23px; font-variant-numeric: tabular-nums; font-weight: 700; }
+.hub-batch-view progress { width: 100%; height: 12px; }
+.hub-batch-table { width: 100%; }
+.hub-batch-table td { min-width: 110px; vertical-align: top; white-space: normal; overflow-wrap: anywhere; }
+.hub-batch-table td:first-child, .hub-batch-table td:last-child { min-width: 160px; }
+.hub-settings-overlay { position: fixed; z-index: 30; inset: 0; background: rgba(0,0,0,.35); display: flex; justify-content: center; align-items: center; padding: 16px; }
+.hub-settings-dialog { width: min(1040px, 100%); max-height: 94dvh; overflow: auto; border-radius: 14px; padding: 0 20px 20px; background: var(--bg); box-shadow: 0 16px 64px rgba(0,0,0,.2); }
+.hub-settings-dialog-head { position: sticky; top: 0; display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 12px 0; background: var(--bg); z-index: 1; }
+.hub-settings-dialog .hub-card { margin: 12px 0; }
+
+.hub-batch-single-controls { grid-template-columns: minmax(0, 1fr); }

@@ -138,7 +138,7 @@ afterEach(() => {
 })
 
 describe('group rates missing main account behavior', () => {
-  it('loads locally before checking, renders confirmed missing separately, and only offers local cleanup', async () => {
+  it('loads locally before checking, renders confirmed missing separately and preserves local cleanup', async () => {
     const wrapper = await mountView()
 
     expect(harness.calls[0]).toBe('rates')
@@ -176,6 +176,50 @@ describe('group rates missing main account behavior', () => {
     })
     expect(harness.listGroupRates).toHaveBeenCalledTimes(3)
     expect(harness.listRealConnections).toHaveBeenCalledTimes(3)
+  })
+
+  it('can directly reconnect a confirmed missing account while keeping the old pricing mapping', async () => {
+    const wrapper = await mountView()
+    const missingRow = rowByGroup(wrapper, '失效分组')
+    const reconnect = missingRow.findAll('button').find(button => button.text().trim() === '重新对接')
+    expect(reconnect).toBeDefined()
+    expect(rowByGroup(wrapper, '正常分组').text()).not.toContain('重新对接')
+    await reconnect!.trigger('click')
+    await flushPromises()
+    const dialog = wrapper.get('[role="dialog"]')
+    expect(dialog.text()).toContain('重新对接')
+    expect(dialog.text()).toContain('原调价映射仍保留')
+    expect(harness.realDisconnect).not.toHaveBeenCalled()
+    expect(harness.realConnect).not.toHaveBeenCalled()
+  })
+
+  it('reconnect checks the original page scope and does not release other unconfirmed rows', async () => {
+    const response = (confirmed: RealConnection[]) => ({ workspaceAdminAccountId: 'workspace-c5', total: 2, confirmedConnectionIds: confirmed.map(c => c.id), confirmedStatuses: Object.fromEntries(confirmed.map(c => [c.id,c.status || 'active'])), unconfirmedConnectionIds: connections.filter(c=>!confirmed.includes(c)).map(c=>c.id), changedConnectionIds: [], skippedConnectionIds: [], issues: [], storageUncertain: false })
+    harness.checkRealConnections.mockResolvedValueOnce(response([])).mockResolvedValueOnce(response([connections[1]!]))
+    const wrapper=await mountView(); const active=()=>rowByGroup(wrapper,'正常分组').findAll('button').at(-1)!
+    expect(active().element).toHaveProperty('disabled',true)
+    const reconnect=rowByGroup(wrapper,'失效分组').findAll('button').find(b=>b.text().trim()==='重新对接')!
+    await reconnect.trigger('click');await flushPromises()
+    expect(harness.checkRealConnections.mock.calls[1]![0]).toMatchObject({mode:'manual',groupRefs:expect.arrayContaining([{siteId:'site-active',groupId:'active-group',groupName:'正常分组'},{siteId:'site-missing',groupId:'missing-group',groupName:'失效分组'}])})
+    expect(wrapper.get('[role="dialog"]').text()).toContain('重新对接')
+    expect(active().element).toHaveProperty('disabled',true)
+    expect(harness.realDisconnect).not.toHaveBeenCalled()
+  })
+
+  it.each(['failed','restored'] as const)('reconnect stays closed when the follow-up check is %s',async kind=>{
+    const unconfirmed={workspaceAdminAccountId:'workspace-c5',total:2,confirmedConnectionIds:[],confirmedStatuses:{},unconfirmedConnectionIds:connections.map(c=>c.id),changedConnectionIds:[],skippedConnectionIds:[],issues:[],storageUncertain:false}
+    harness.checkRealConnections.mockResolvedValueOnce(unconfirmed)
+    if(kind==='failed')harness.checkRealConnections.mockRejectedValueOnce(new Error('主站暂时无法读取'))
+    else harness.checkRealConnections.mockImplementationOnce(async()=>{
+      const latest=[connections[0]!,{...connections[1]!,status:'active'}]
+      harness.listRealConnections.mockResolvedValue(latest)
+      return {...unconfirmed,confirmedConnectionIds:latest.map(c=>c.id),confirmedStatuses:Object.fromEntries(latest.map(c=>[c.id,'active'])),unconfirmedConnectionIds:[]}
+    })
+    const w=await mountView()
+    await rowByGroup(w,'失效分组').findAll('button').find(b=>b.text().trim()==='重新对接')!.trigger('click');await flushPromises()
+    expect(w.find('[role="dialog"]').exists()).toBe(false);expect(harness.realConnect).not.toHaveBeenCalled();expect(harness.realDisconnect).not.toHaveBeenCalled()
+    if(kind==='failed'){expect(w.text()).toContain('主站暂时无法读取');expect(rowByGroup(w,'正常分组').findAll('button').at(-1)!.element).toHaveProperty('disabled',true)}
+    else{expect(w.text()).toContain('主站账号仍存在');expect(rowByGroup(w,'失效分组').text()).not.toContain('重新对接')}
   })
 
   it('prefers an active connection over a missing duplicate for the same target', async () => {

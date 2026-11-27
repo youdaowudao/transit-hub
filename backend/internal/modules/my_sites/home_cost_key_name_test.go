@@ -125,7 +125,7 @@ func TestHomeCostManagedKeyNameIncludesCreationMonthDay(t *testing.T) {
 				if keyCreates != 1 || accountCreates != 1 || tokenLists != wantTokenLists {
 					t.Fatalf("unexpected extra creation or name queries: keys=%d accounts=%d tokenLists=%d", keyCreates, accountCreates, tokenLists)
 				}
-				if accountName != "A-【验收-source】-vip" || result.Connection.AdminAccountName != accountName || connRepo.connection == nil {
+				if accountName != "A-GPT-【验收-source】-vip" || result.Connection.AdminAccountName != accountName || connRepo.connection == nil {
 					t.Fatal("main account name or local persistence changed")
 				}
 			})

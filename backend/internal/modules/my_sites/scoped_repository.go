@@ -9,6 +9,7 @@ import (
 	"sort"
 	"strings"
 	"time"
+	"transithub/backend/internal/shared/workspacescope"
 )
 
 const scopedLatestGroupsSQL = `
@@ -96,8 +97,10 @@ func (r *Repository) ListScopedRealConnections(ctx context.Context, userID, work
 }
 
 func (r *Repository) ReadScopedConnectionSnapshots(ctx context.Context, userID, workspaceID string, scope ScopedConnectionScope) ([]ScopedConnectionSnapshot, error) {
-	if err := r.validateScopedOwnership(ctx, userID, workspaceID, scope); err != nil {
-		return nil, err
+	if !scope.WorkspaceWide {
+		if err := r.validateScopedOwnership(ctx, userID, workspaceID, scope); err != nil {
+			return nil, err
+		}
 	}
 	raw, err := json.Marshal(scope.GroupRefs)
 	if err != nil {
@@ -111,12 +114,12 @@ func (r *Repository) ReadScopedConnectionSnapshots(ctx context.Context, userID, 
  admin_account_id,admin_account_name,admin_platform,status,xmin::text
  FROM real_connections AS connection_row
  WHERE user_id=$1 AND workspace_admin_account_id=$2 AND
- (($3<>'' AND upstream_site_id=$3) OR ($3='' AND EXISTS(
+ ($5 OR ($3<>'' AND upstream_site_id=$3) OR ($3='' AND EXISTS(
  SELECT 1 FROM jsonb_to_recordset($4::jsonb) AS ref("siteId" text,"groupId" text,"groupName" text)
  WHERE upstream_site_id=ref."siteId" AND
  ((upstream_group_id<>'' AND ref."groupId"<>'' AND upstream_group_id=ref."groupId") OR
  ((upstream_group_id='' OR ref."groupId"='') AND upstream_group_name=ref."groupName")))))
- ORDER BY id`, userID, workspaceID, scope.SiteID, raw)
+ ORDER BY id`, userID, workspaceID, scope.SiteID, raw, scope.WorkspaceWide)
 	if err != nil {
 		return nil, err
 	}
@@ -132,7 +135,39 @@ func (r *Repository) ReadScopedConnectionSnapshots(ctx context.Context, userID, 
 	return result, rows.Err()
 }
 
+func (r *Repository) ValidateInventoryWorkspace(ctx context.Context, scope workspacescope.Scope, current bool) error {
+	if current {
+		if err := workspacescope.Resolve(ctx, r.db, scope); err != nil {
+			return err
+		}
+	}
+	var created time.Time
+	var platform string
+	err := r.db.QueryRow(ctx, `SELECT created_at,platform FROM admin_accounts WHERE user_id=$1 AND id=$2`, scope.UserID, scope.AdminAccountID).Scan(&created, &platform)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return workspacescope.ErrChanged
+	}
+	if err != nil {
+		return err
+	}
+	if created.Format(time.RFC3339Nano) != scope.CreatedAt {
+		return workspacescope.ErrChanged
+	}
+	if platform != "sub2api" {
+		return scopedInvalid("只支持核对 Sub2API 主站账号；本次未读取或修改账号状态")
+	}
+	return nil
+}
+
 func (r *Repository) ApplyScopedConnectionStatuses(ctx context.Context, snapshots []ScopedConnectionSnapshot, determined map[string]string) (ScopedStatusApplyResult, error) {
+	return r.applyScopedConnectionStatuses(ctx, snapshots, determined, nil, false)
+}
+
+func (r *Repository) ApplyInventoryConnectionStatuses(ctx context.Context, scope workspacescope.Scope, current bool, snapshots []ScopedConnectionSnapshot, determined map[string]string) (ScopedStatusApplyResult, error) {
+	return r.applyScopedConnectionStatuses(ctx, snapshots, determined, &scope, current)
+}
+
+func (r *Repository) applyScopedConnectionStatuses(ctx context.Context, snapshots []ScopedConnectionSnapshot, determined map[string]string, scope *workspacescope.Scope, current bool) (ScopedStatusApplyResult, error) {
 	result := ScopedStatusApplyResult{ConfirmedConnectionIDs: make([]string, 0), ChangedConnectionIDs: make([]string, 0)}
 	if len(determined) == 0 {
 		return result, nil
@@ -148,6 +183,11 @@ func (r *Repository) ApplyScopedConnectionStatuses(ctx context.Context, snapshot
 		defer cancel()
 		_ = tx.Rollback(rollbackCtx)
 	}()
+	if scope != nil {
+		if err = workspacescope.Lock(ctx, tx, *scope, current); err != nil {
+			return result, &ScopedStorageError{Cause: err}
+		}
+	}
 	for _, snapshot := range ordered {
 		status, known := determined[snapshot.ID]
 		if !known {

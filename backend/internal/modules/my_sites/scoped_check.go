@@ -12,6 +12,7 @@ import (
 	"transithub/backend/internal/modules/upstream"
 	"transithub/backend/internal/shared/authctx"
 	"transithub/backend/internal/shared/httpjson"
+	"transithub/backend/internal/shared/workspacescope"
 )
 
 type ScopedConnectionStatusRepository interface {
@@ -19,8 +20,14 @@ type ScopedConnectionStatusRepository interface {
 	ApplyScopedConnectionStatuses(context.Context, []ScopedConnectionSnapshot, map[string]string) (ScopedStatusApplyResult, error)
 }
 
+type InventoryConnectionStatusRepository interface {
+	ScopedConnectionStatusRepository
+	ValidateInventoryWorkspace(context.Context, workspacescope.Scope, bool) error
+	ApplyInventoryConnectionStatuses(context.Context, workspacescope.Scope, bool, []ScopedConnectionSnapshot, map[string]string) (ScopedStatusApplyResult, error)
+}
+
 func scopedCheckLimits(mode string) (time.Duration, time.Duration) {
-	if mode == "manual" {
+	if mode == "manual" || mode == "inventory" {
 		return 45 * time.Second, 10 * time.Second
 	}
 	return 20 * time.Second, 5 * time.Second
@@ -88,9 +95,55 @@ func (s *Service) CheckScopedRealConnections(ctx context.Context, userID string,
 		return ScopedCheckResult{}, err
 	}
 	req.SiteID = strings.TrimSpace(req.SiteID)
+	if req.Mode == "inventory" {
+		if req.WorkspaceCreatedAt == "" || len(req.SiteID) > 128 || req.GroupRefs != nil || req.WorkspaceWide == (req.SiteID != "") {
+			return ScopedCheckResult{}, scopedInvalid("完整账号核对必须明确选择全部主站账号或一个上游站点，并提供当前工作区资料")
+		}
+		return s.checkConnectionInventoryForWorkspace(ctx, workspacescope.Scope{UserID: userID, AdminAccountID: workspace, CreatedAt: req.WorkspaceCreatedAt}, true, req.SiteID)
+	}
+	if req.WorkspaceWide || req.WorkspaceCreatedAt != "" {
+		return ScopedCheckResult{}, scopedInvalid("全站范围只用于完整账号核对")
+	}
 	if (req.Mode != "automatic" && req.Mode != "manual") || len(req.SiteID) > 128 || (req.SiteID != "" && req.GroupRefs != nil) || (req.SiteID == "" && req.GroupRefs == nil) {
 		return ScopedCheckResult{}, scopedInvalid("检查方式必须是进入检查或手动刷新，网站与当前页分组必须且只能选择一种")
 	}
+	return s.checkScopedForWorkspace(ctx, userID, workspace, req, nil, false)
+}
+
+func (s *Service) checkConnectionInventoryForWorkspace(ctx context.Context, scope workspacescope.Scope, current bool, siteID string) (ScopedCheckResult, error) {
+	// Bound local reads as well as the explicit remote and save budgets.
+	ctx, cancel := context.WithTimeout(ctx, 48*time.Second)
+	defer cancel()
+	repo, ok := s.connRepository.(InventoryConnectionStatusRepository)
+	if !ok {
+		return ScopedCheckResult{}, scopedReadFailure("主站账号核对入口", nil)
+	}
+	if err := repo.ValidateInventoryWorkspace(ctx, scope, current); err != nil {
+		if errors.Is(err, workspacescope.ErrChanged) {
+			return ScopedCheckResult{}, scopedWorkspaceMismatch()
+		}
+		var known *scopedRequestError
+		if errors.As(err, &known) {
+			return ScopedCheckResult{}, err
+		}
+		return ScopedCheckResult{}, scopedReadFailure("当前Sub2API工作区资料", err)
+	}
+	key := [2]string{scope.UserID, scope.AdminAccountID}
+	s.inventoryMutex.Lock()
+	if s.inventoryInFlight[key] {
+		s.inventoryMutex.Unlock()
+		return ScopedCheckResult{}, &scopedRequestError{Status: http.StatusConflict, Message: "这个工作区正在核对主站账号，本次没有再次请求主站", Detail: "另一轮主站账号核对正在进行，未修改主站", Next: "请等本轮结束后重试"}
+	}
+	if s.inventoryInFlight == nil {
+		s.inventoryInFlight = make(map[[2]string]bool)
+	}
+	s.inventoryInFlight[key] = true
+	s.inventoryMutex.Unlock()
+	defer func() { s.inventoryMutex.Lock(); delete(s.inventoryInFlight, key); s.inventoryMutex.Unlock() }()
+	return s.checkScopedForWorkspace(ctx, scope.UserID, scope.AdminAccountID, ScopedCheckRequest{Mode: "inventory", WorkspaceAdminAccountID: scope.AdminAccountID, WorkspaceWide: siteID == "", SiteID: siteID}, &scope, current)
+}
+
+func (s *Service) checkScopedForWorkspace(ctx context.Context, userID, workspace string, req ScopedCheckRequest, inventoryScope *workspacescope.Scope, current bool) (ScopedCheckResult, error) {
 	refs, err := normalizeScopedRefs(req.GroupRefs)
 	if err != nil {
 		return ScopedCheckResult{}, err
@@ -99,7 +152,7 @@ func (s *Service) CheckScopedRealConnections(ctx context.Context, userID string,
 	if !ok {
 		return ScopedCheckResult{}, scopedReadFailure("本批账号对接资料", nil)
 	}
-	snapshots, err := repo.ReadScopedConnectionSnapshots(ctx, userID, workspace, ScopedConnectionScope{WorkspaceAdminAccountID: workspace, SiteID: req.SiteID, GroupRefs: refs})
+	snapshots, err := repo.ReadScopedConnectionSnapshots(ctx, userID, workspace, ScopedConnectionScope{WorkspaceAdminAccountID: workspace, SiteID: req.SiteID, GroupRefs: refs, WorkspaceWide: req.WorkspaceWide})
 	if err != nil {
 		var known *scopedRequestError
 		if errors.As(err, &known) {
@@ -113,9 +166,13 @@ func (s *Service) CheckScopedRealConnections(ctx context.Context, userID string,
 	accountOrder := make([]string, 0)
 	for _, row := range snapshots {
 		categories[row.ID] = "unconfirmed"
-		if !scopedApplicable(row) {
+		if !scopedApplicable(row) || (inventoryScope != nil && row.Status != "" && row.Status != ConnectionStatusActive && row.Status != ConnectionStatusMissing) {
 			categories[row.ID] = "skipped"
-			result.Issues = append(result.Issues, scopedConnectionIssue(row, ScopedCheckIssue{Step: "scope", Detail: "这条记录没有主站账号ID，或使用其他主站平台，本次保持原状态", Next: "请沿原对接入口处理；本次未修改主站账号", RetryAllowed: false}))
+			detail := "这条记录没有主站账号ID，或使用其他主站平台，本次保持原状态"
+			if inventoryScope != nil && scopedApplicable(row) {
+				detail = "这条对接状态不适用于本次核对，本次保持原状态"
+			}
+			result.Issues = append(result.Issues, scopedConnectionIssue(row, ScopedCheckIssue{Step: "scope", Detail: detail, Next: "请沿原对接入口处理；本次未修改主站账号", RetryAllowed: false}))
 			continue
 		}
 		if !validScopedAccountID(row.AdminAccountID) {
@@ -186,100 +243,131 @@ func (s *Service) CheckScopedRealConnections(ctx context.Context, userID string,
 		finish()
 		return result, nil
 	}
-	type observation struct {
-		found bool
-		err   error
-	}
-	observations := make(map[string]observation, len(accountOrder))
-	var mu sync.Mutex
-	next := 0
-	var workers sync.WaitGroup
-	for worker := 0; worker < 2; worker++ {
-		workers.Add(1)
-		go func() {
-			defer workers.Done()
-			for {
-				mu.Lock()
-				if batchCtx.Err() != nil || next >= len(accountOrder) {
-					mu.Unlock()
-					return
-				}
-				accountID := accountOrder[next]
-				next++
-				mu.Unlock()
-				if batchCtx.Err() != nil {
-					return
-				}
-				itemCtx, itemCancel := context.WithTimeout(batchCtx, itemLimit)
-				found, err := s.platformService.ReadSub2APIAdminAccountExistenceContext(itemCtx, session, accountID)
-				itemCancel()
-				mu.Lock()
-				observations[accountID] = observation{found: found, err: err}
-				mu.Unlock()
-			}
-		}()
-	}
-	workers.Wait()
 	determined := make(map[string]string)
-	pendingMissing := make([]string, 0)
-	for _, accountID := range accountOrder {
-		observed, completed := observations[accountID]
-		if completed && observed.err == nil && observed.found {
-			for _, row := range accounts[accountID] {
-				determined[row.ID] = ConnectionStatusActive
-			}
-			continue
-		}
-		var remote *upstream.RequestError
-		if completed && errors.As(observed.err, &remote) && remote.StatusCode == http.StatusNotFound {
-			if req.Mode == "manual" {
-				pendingMissing = append(pendingMissing, accountID)
-			} else {
-				for _, row := range accounts[accountID] {
-					result.Issues = append(result.Issues, scopedConnectionIssue(row, ScopedCheckIssue{Step: "detail", Detail: "主站暂时查不到这个账号，尚不能确认是否已删除，当前仍保留上次状态", Next: "请点击刷新进一步核对；本次未创建或删除账号", RetryAllowed: true, HTTPStatus: http.StatusNotFound}))
-				}
-			}
-			continue
-		}
-		cause := observed.err
-		if !completed {
-			cause = batchCtx.Err()
-			if cause == nil {
-				cause = context.DeadlineExceeded
-			}
-		}
-		detail, status := scopedRemoteCause(cause, session)
-		for _, row := range accounts[accountID] {
-			result.Issues = append(result.Issues, scopedConnectionIssue(row, ScopedCheckIssue{Step: "detail", Detail: "读取主站账号时未能确认：" + detail + "；仍保留上次状态", Next: "请稍后刷新，并检查主站账号详情是否能正常打开", RetryAllowed: true, HTTPStatus: status}))
-		}
-	}
-	if len(pendingMissing) > 0 {
+	if inventoryScope != nil {
 		ids, listErr := s.platformService.ListSub2APIAdminAccountIDsStrictContext(batchCtx, session)
-		for _, accountID := range pendingMissing {
-			if listErr == nil {
-				status := ConnectionStatusMissing
-				if _, exists := ids[accountID]; exists {
-					status = ConnectionStatusActive
+		if listErr == nil {
+			listErr = batchCtx.Err()
+		}
+		if listErr != nil {
+			detail, status := scopedRemoteCause(listErr, session)
+			result.Issues = append(result.Issues, ScopedCheckIssue{Step: "inventory", Detail: "完整主站账号名单未能读取完成：" + detail + "；本次未更新账号状态", Next: "请稍后手动核对，并检查主站的账号列表是否能正常打开", RetryAllowed: true, HTTPStatus: status})
+			finish()
+			return result, nil
+		}
+		for _, accountID := range accountOrder {
+			status := ConnectionStatusMissing
+			if _, exists := ids[accountID]; exists {
+				status = ConnectionStatusActive
+			}
+			for _, row := range accounts[accountID] {
+				determined[row.ID] = status
+			}
+		}
+	} else {
+		type observation struct {
+			found bool
+			err   error
+		}
+		observations := make(map[string]observation, len(accountOrder))
+		var mu sync.Mutex
+		next := 0
+		var workers sync.WaitGroup
+		for worker := 0; worker < 2; worker++ {
+			workers.Add(1)
+			go func() {
+				defer workers.Done()
+				for {
+					mu.Lock()
+					if batchCtx.Err() != nil || next >= len(accountOrder) {
+						mu.Unlock()
+						return
+					}
+					accountID := accountOrder[next]
+					next++
+					mu.Unlock()
+					if batchCtx.Err() != nil {
+						return
+					}
+					itemCtx, itemCancel := context.WithTimeout(batchCtx, itemLimit)
+					found, err := s.platformService.ReadSub2APIAdminAccountExistenceContext(itemCtx, session, accountID)
+					itemCancel()
+					mu.Lock()
+					observations[accountID] = observation{found: found, err: err}
+					mu.Unlock()
 				}
+			}()
+		}
+		workers.Wait()
+		pendingMissing := make([]string, 0)
+		for _, accountID := range accountOrder {
+			observed, completed := observations[accountID]
+			if completed && observed.err == nil && observed.found {
 				for _, row := range accounts[accountID] {
-					determined[row.ID] = status
+					determined[row.ID] = ConnectionStatusActive
 				}
-			} else {
-				detail, status := scopedRemoteCause(listErr, session)
-				for _, row := range accounts[accountID] {
-					result.Issues = append(result.Issues, scopedConnectionIssue(row, ScopedCheckIssue{Step: "inventory", Detail: "进一步核对这个账号是否已删除时，完整账号列表未能读取完成：" + detail + "；删除状态未更新", Next: "请稍后刷新，并检查主站的账号列表是否能正常打开", RetryAllowed: true, HTTPStatus: status}))
+				continue
+			}
+			var remote *upstream.RequestError
+			if completed && errors.As(observed.err, &remote) && remote.StatusCode == http.StatusNotFound {
+				if req.Mode == "manual" {
+					pendingMissing = append(pendingMissing, accountID)
+				} else {
+					for _, row := range accounts[accountID] {
+						result.Issues = append(result.Issues, scopedConnectionIssue(row, ScopedCheckIssue{Step: "detail", Detail: "主站暂时查不到这个账号，尚不能确认是否已删除，当前仍保留上次状态", Next: "请点击刷新进一步核对；本次未创建或删除账号", RetryAllowed: true, HTTPStatus: http.StatusNotFound}))
+					}
+				}
+				continue
+			}
+			cause := observed.err
+			if !completed {
+				cause = batchCtx.Err()
+				if cause == nil {
+					cause = context.DeadlineExceeded
+				}
+			}
+			detail, status := scopedRemoteCause(cause, session)
+			for _, row := range accounts[accountID] {
+				result.Issues = append(result.Issues, scopedConnectionIssue(row, ScopedCheckIssue{Step: "detail", Detail: "读取主站账号时未能确认：" + detail + "；仍保留上次状态", Next: "请稍后刷新，并检查主站账号详情是否能正常打开", RetryAllowed: true, HTTPStatus: status}))
+			}
+		}
+		if len(pendingMissing) > 0 {
+			ids, listErr := s.platformService.ListSub2APIAdminAccountIDsStrictContext(batchCtx, session)
+			for _, accountID := range pendingMissing {
+				if listErr == nil {
+					status := ConnectionStatusMissing
+					if _, exists := ids[accountID]; exists {
+						status = ConnectionStatusActive
+					}
+					for _, row := range accounts[accountID] {
+						determined[row.ID] = status
+					}
+				} else {
+					detail, status := scopedRemoteCause(listErr, session)
+					for _, row := range accounts[accountID] {
+						result.Issues = append(result.Issues, scopedConnectionIssue(row, ScopedCheckIssue{Step: "inventory", Detail: "进一步核对这个账号是否已删除时，完整账号列表未能读取完成：" + detail + "；删除状态未更新", Next: "请稍后刷新，并检查主站的账号列表是否能正常打开", RetryAllowed: true, HTTPStatus: status}))
+					}
 				}
 			}
 		}
 	}
 	// The batch deadline can retain established results; a canceled client cannot.
 	if ctx.Err() != nil || len(determined) == 0 {
+		if inventoryScope != nil && ctx.Err() != nil {
+			result.Issues = append(result.Issues, ScopedCheckIssue{Step: "save", Detail: "本次核对已取消或超时，尚未开始保存账号状态", Next: "请重新读取本地对接并手动核对", RetryAllowed: true})
+		}
 		finish()
 		return result, nil
 	}
 	saveCtx, saveCancel := context.WithTimeout(ctx, 3*time.Second)
 	defer saveCancel()
-	applied, saveErr := repo.ApplyScopedConnectionStatuses(saveCtx, snapshots, determined)
+	var applied ScopedStatusApplyResult
+	var saveErr error
+	if inventoryScope != nil {
+		applied, saveErr = repo.(InventoryConnectionStatusRepository).ApplyInventoryConnectionStatuses(saveCtx, *inventoryScope, current, snapshots, determined)
+	} else {
+		applied, saveErr = repo.ApplyScopedConnectionStatuses(saveCtx, snapshots, determined)
+	}
 	for _, id := range applied.ChangedConnectionIDs {
 		categories[id] = "changed"
 		for _, row := range snapshots {
@@ -290,6 +378,10 @@ func (s *Service) CheckScopedRealConnections(ctx context.Context, userID string,
 		}
 	}
 	if saveErr != nil {
+		if inventoryScope != nil && errors.Is(saveErr, workspacescope.ErrChanged) {
+			finish()
+			return result, scopedWorkspaceMismatch()
+		}
 		var storage *ScopedStorageError
 		uncertain := errors.As(saveErr, &storage) && storage.Uncertain
 		result.StorageUncertain = uncertain

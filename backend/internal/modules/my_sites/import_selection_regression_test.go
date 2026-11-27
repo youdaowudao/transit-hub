@@ -147,7 +147,7 @@ func TestImportSelectionExplicitPlatformEntirePipeline(t *testing.T) {
 			if target == "grok" {
 				source = "openai"
 			}
-			c51AssertImportedPlatform(t, source, " "+strings.ToUpper(target)+" ", target, []string{"A", "B", "C", "D", "X", "X", "X", "X", "X"}[i])
+			c51AssertImportedPlatform(t, source, " "+strings.ToUpper(target)+" ", target, []string{"A-GPT", "B-Claude", "C-Gemini", "D-Antigravity", "X-Grok", "X-Kimi", "X-GLM", "X-DeepSeek", "X-MiniMax"}[i])
 		})
 	}
 }

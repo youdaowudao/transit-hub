@@ -5,6 +5,7 @@ import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import EmailTemplatesPanel from '../components/settings/EmailTemplatesPanel.vue'
 import DailyReportPanel from '../components/settings/DailyReportPanel.vue'
+import MainAccountCheckSettings from '../components/settings/MainAccountCheckSettings.vue'
 import { saveStrategyWithDailyReport } from '../api/reports'
 import type { DailyReportBot, DailyReportScope } from '../types/reports'
 import NotificationTemplateEditor from '../components/settings/NotificationTemplateEditor.vue'
@@ -1249,6 +1250,7 @@ onBeforeUnmount(() => {
             通知渠道读取失败：{{ t(errorChannels) }}。请点击下方“{{ t('admin.settings.dailyReport.reloadSettings') }}”；读取成功后才能保存，不会修改主站。
           </p>
 
+          <MainAccountCheckSettings v-if="reportScope && notificationAccount?.platform === 'sub2api'" :scope="reportScope" :switching="notificationSwitching" />
           <fieldset :disabled="!reportScope || !savedReportStrategy || !channelsLoaded || notificationSwitching" class="space-y-5">
           <!-- Card 1: Data Refresh -->
           <div class="rounded-2xl border border-border/50 bg-card shadow-sm overflow-hidden">

@@ -12,9 +12,9 @@ import (
 // SPEC G01–G06. The existing transport stays in memory and opens no port.
 func TestGrokREDSelectionEntirePipeline(t *testing.T) {
 	for _, source := range []string{"grok", "openai", "anthropic", "gemini", "antigravity", "kimi", "zhipu", "deepseek", "minimax", "", "unknown"} {
-		t.Run(source, func(t *testing.T) { c51AssertImportedPlatform(t, source, " GrOk ", "grok", "X") })
+		t.Run(source, func(t *testing.T) { c51AssertImportedPlatform(t, source, " GrOk ", "grok", "X-Grok") })
 	}
-	t.Run("cached-classification-fallback", func(t *testing.T) { c51AssertImportedPlatform(t, "grok", "", "grok", "X") })
+	t.Run("cached-classification-fallback", func(t *testing.T) { c51AssertImportedPlatform(t, "grok", "", "grok", "X-Grok") })
 }
 
 func TestGrokREDSettingsModelsAndAssociation(t *testing.T) {

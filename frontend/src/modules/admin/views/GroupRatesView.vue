@@ -102,6 +102,9 @@ const selectedRate = ref<GroupRate | null>(null)
 const isHistoryOpen = ref(false)
 const editingRate = ref<GroupRate | null>(null)
 const connectingRate = ref<GroupRate | null>(null)
+const isReconnectConnector = ref(false)
+const reconnectPricingNotice = ref(false)
+const reconnectChecking = ref(false)
 const editTypeValue = ref('')
 const connectOwnGroups = ref<string[]>([])
 const connectMode = ref<'real' | 'bind'>('real')
@@ -199,6 +202,8 @@ const disconnectRemovePricing = ref(true)
 const isDisconnecting = ref(false)
 const disconnectError = ref('')
 const isCheckingConnections = ref(false)
+// Preserve read-only navigation only while the check request is still unanswered.
+const checkRequestPending = ref(false)
 const connectionCheckError = ref('')
 const groupEditingRate = ref<GroupRate | null>(null)
 const groupEditorState = ref<'loading' | 'readFailed' | 'ready' | 'submitting' | 'syncing'>('loading')
@@ -401,6 +406,8 @@ watch([() => currentAccount.value?.id, adminPlatform], () => {
   connectSubmitLocked.value = false
   isActionLoading.value = false
   connectingRate.value = null
+  isReconnectConnector.value = false
+  reconnectPricingNotice.value = false
   connectOwnGroups.value = []
   ownGroups.value = []
   mySiteMappings.value = []
@@ -773,6 +780,11 @@ const frozenScope = (): Omit<ScopedCheckRequest, 'mode'> => ({ workspaceAdminAcc
 const connectionMatchesScope = (connection: RealConnection, scope = lastCheckScope): boolean => Boolean(scope && (scope.siteId ? connection.upstreamSiteId === scope.siteId : scope.groupRefs?.some(ref => connection.upstreamSiteId === ref.siteId && ((Boolean(connection.upstreamGroupId && ref.groupId) && connection.upstreamGroupId === ref.groupId) || ((!connection.upstreamGroupId || !ref.groupId) && connection.upstreamGroupName === ref.groupName)))))
 const applicableConnection = (connection: RealConnection) => Boolean(connection.adminAccountId?.trim() && (!connection.adminPlatform || connection.adminPlatform === 'sub2api'))
 type SiteMenuHealthItem = { key: string; label: string; groupId: string; groupName: string; accountIds: string[]; disabledReason: string }
+const siteMenuNavigating = ref(false)
+const siteMenuConnectionMatches = (c: RealConnection, id: string, groupId: string, groupName: string) =>
+  c.adminAccountId?.trim() === id && applicableConnection(c) && (!c.status || c.status === 'active') &&
+  (checkRequestPending.value || !unconfirmedIds.value.has(c.id)) && !changedIds.value.has(c.id) &&
+  (groupId ? c.ownGroupIds?.includes(groupId) : c.ownGroupNames?.includes(groupName))
 const siteMenuHealthItems = computed<SiteMenuHealthItem[]>(() => {
   const rate = siteMenuRate.value
   if (!rate) return []
@@ -781,6 +793,7 @@ const siteMenuHealthItems = computed<SiteMenuHealthItem[]>(() => {
   if (cells.kind === 'unknown') disabledReason = '对接资料还没读到，请点‘刷新数据’后再试。'
   else if (isMainAccountMissing(rate)) disabledReason = rate.deleted
     ? '对接的主站账号已不存在，这个上游分组也已删除，分组健康里没有可查看的内容。'
+    : canReconnectRate(rate) ? '对接的主站账号已不存在，分组健康里看不到它；可点右侧‘重新对接’，尚未确认时会先核对。'
     : '对接的主站账号已不存在，分组健康里看不到它；可点右侧‘清理本地失效对接’。'
   else if (cells.kind === 'blank') disabledReason = rate.deleted
     ? '这个上游分组已删除，也没有对接主站账号，分组健康里没有可查看的内容。'
@@ -789,7 +802,10 @@ const siteMenuHealthItems = computed<SiteMenuHealthItem[]>(() => {
     ? '对接记录里没有主站分组，无法定位；可点右侧‘修改主站分组’补上。'
     : '对接记录里没有主站分组，无法直接定位；请到分组健康，在左侧搜索框输入这个主站账号的名称查找。'
   if (disabledReason) return [{ key: 'disabled', label: '去分组健康', groupId: '', groupName: '', accountIds: [], disabledReason }]
-  return cells.lines.map(line => ({ key: line.key, label: `去分组健康：${line.name}`, groupId: line.id, groupName: line.name, accountIds: line.accountIds, disabledReason: '' }))
+  return cells.lines.map(line => {
+    const ids = adminPlatform.value === 'sub2api' ? line.accountIds.filter(id => realConnectionsForRate(rate).some(c => siteMenuConnectionMatches(c, id, line.id, line.name))) : line.accountIds
+    return { key: line.key, label: `去分组健康：${line.name}`, groupId: line.id, groupName: line.name, accountIds: ids, disabledReason: adminPlatform.value === 'sub2api' && !ids.length ? '这个账号的对接状态尚未确认，不能去分组健康，请点击刷新数据核对；已删除时使用重新对接。' : '' }
+  })
 })
 const siteMenuWebsite = computed(() => {
   const site = upstreamSiteOptions.value.find(site => site.id === siteMenuRate.value?.siteId)
@@ -797,14 +813,38 @@ const siteMenuWebsite = computed(() => {
   if (!site) return unavailable(siteOptionsError.value || '网站资料里没有这个网站，可能还在读取，或已在上游管理删除。请稍后点‘刷新数据’；仍没有时到上游管理检查。')
   return upstreamWebsiteLink(site)
 })
-const goToHealthGroup = (item: SiteMenuHealthItem) => {
-  if (item.disabledReason) return
+const goToHealthGroup = async (item: SiteMenuHealthItem) => {
+  if (item.disabledReason || siteMenuNavigating.value) return
+  const rate = siteMenuRate.value
+  const workspace = currentAccount.value?.id || ''
+  const generation = pageGeneration
+  const current = () => pageIsMounted && workspace === currentAccount.value?.id && generation === pageGeneration && siteMenuRate.value === rate
+  let accountIds = item.accountIds
+  if (adminPlatform.value === 'sub2api' && rate) {
+    siteMenuNavigating.value = true
+    try {
+      const latest = await listScopedRealConnections({ workspaceAdminAccountId: workspace, groupRefs: [{ siteId: rate.siteId, groupId: rate.groupId || '', groupName: rate.groupName }] })
+      if (!current()) return
+      const before = realConnectionsForRate(rate)
+      accountIds = accountIds.filter(id => latest.items.some(c => siteMenuConnectionMatches(c, id, item.groupId, item.groupName) && before.some(old => sameConnectionIdentity(old, c))))
+      if (!accountIds.length) {
+        closeSiteMenu()
+        connectionCheckError.value = '对接已变化，无法按旧资料去分组健康；请核对主站账号，已删除时使用重新对接。'
+        await loadLocalPage({ generation })
+        return
+      }
+    } catch (error) {
+      if (current()) { connectionCheckError.value = `去分组健康前无法读取最新对接：${displayCause(error)}；没有跳转，请点击刷新数据重试。`; closeSiteMenu() }
+      return
+    } finally { siteMenuNavigating.value = false }
+  }
+  if (rate && !current()) return
   closeSiteMenu()
   void router.push({ name: 'AdminConnectionHealth', query: {
     focusGroupId: item.groupId || undefined,
     focusGroupName: item.groupName || undefined,
-    focusAccountIds: item.accountIds.join(',') || undefined,
-    focusWorkspace: currentAccount.value?.id || undefined,
+    focusAccountIds: accountIds.join(',') || undefined,
+    focusWorkspace: workspace || undefined,
   } })
 }
 watch(rates, () => closeSiteMenu())
@@ -845,6 +885,8 @@ const invalidatePage = (clear = false) => {
     unconfirmedIds.value = new Set([...unconfirmedIds.value, ...realConnectionsData.value.filter(connection => applicableConnection(connection) && connectionMatchesScope(connection)).map(connection => connection.id)])
   }
   isCheckingConnections.value = false
+  checkRequestPending.value = false
+  reconnectChecking.value = false
   attentionCheckingSite.value = ''
   if (clear) clearCheckState()
   return pageGeneration
@@ -922,6 +964,7 @@ const runScopedCheck = async (mode: 'automatic' | 'manual', scope: Omit<ScopedCh
   checkSummary.value = ''
   let result: ScopedCheckResult | undefined
   let failure = ''
+  checkRequestPending.value = true
   try { result = await checkScopedRealConnections({ ...scope, mode }, controller.signal) }
   catch (error) {
     if (!isCurrent()) return
@@ -929,6 +972,7 @@ const runScopedCheck = async (mode: 'automatic' | 'manual', scope: Omit<ScopedCh
     else failure = `账号检查结果暂时无法取得：${displayCause(error)}；仍保留上次状态，请点击刷新重试，并检查Hub后端检查记录。`
   }
   if (!isCurrent()) return
+  checkRequestPending.value = false
   if (result) {
     unconfirmedIds.value = new Set(result.unconfirmedConnectionIds)
     changedIds.value = new Set(result.changedConnectionIds)
@@ -1284,7 +1328,39 @@ const closeTypeEditor = () => {
   editTypeValue.value = ''
 }
 
-const openConnector = async (rate: GroupRate) => {
+const canReconnectRate = (rate: GroupRate): boolean => {
+  if (adminPlatform.value !== 'sub2api' || rate.deleted || !connectionDataKnown.value) return false
+  const rows = realConnectionsForRate(rate)
+  return rows.length > 0 && rows.every(row => row.status === 'missing' && applicableConnection(row))
+}
+const missingRowsConfirmed = (rate: GroupRate) => canReconnectRate(rate) && realConnectionsForRate(rate).every(row => {
+  const before = checkIdentities.get(row.id)
+  return confirmedIds.value.has(row.id) && !unconfirmedIds.value.has(row.id) && !changedIds.value.has(row.id) && !!before && sameConnectionIdentity(before, row) && before.status === row.status
+})
+const openReconnect = async (rate: GroupRate) => {
+  if (!canReconnectRate(rate) || isCheckingConnections.value || isActionLoading.value || isAnyDialogOpen.value || reconnectChecking.value) return
+  const generation = pageGeneration
+  const workspace = currentAccount.value?.id
+  const current = () => pageIsMounted && generation === pageGeneration && workspace === currentAccount.value?.id && !isAnyDialogOpen.value
+  if (!missingRowsConfirmed(rate)) {
+    reconnectChecking.value = true
+    const scope = frozenScope()
+    const before = realConnectionsData.value.map(c => ({ ...c }))
+    try { await runScopedCheck('manual', scope, before, generation) }
+    finally { if (generation === pageGeneration) reconnectChecking.value = false }
+  }
+  if (!current()) return
+  const latest = rates.value.find(r => r.siteId === rate.siteId && r.groupId === rate.groupId && r.groupName === rate.groupName)
+  if (!latest || !connectionDataKnown.value) return
+  if (isRealConnected(latest)) { connectionCheckError.value = '主站账号仍存在，本次没有新建账号，请查看已有对接。'; return }
+  if (!missingRowsConfirmed(latest)) {
+    if (!connectionCheckError.value) connectionCheckError.value = '本次仍未能确认旧对接已失效，请刷新核对后重试；没有新建账号。'
+    return
+  }
+  await openConnector(latest, true)
+}
+
+const openConnector = async (rate: GroupRate, reconnect = false) => {
   if (connectionOperationBlocked(rate)) return
   invalidatePage()
   invalidateAttention()
@@ -1298,6 +1374,8 @@ const openConnector = async (rate: GroupRate) => {
   connectGroupSelectionNotice.value = ''
   resetImportSettings()
   connectingRate.value = rate
+  isReconnectConnector.value = reconnect
+  reconnectPricingNotice.value = reconnect && (isPricingMapped(rate) || realConnectionsForRate(rate).some(c => c.status === 'missing' && c.pricingMappingEnabled))
   connectOwnGroups.value = []
   connectMode.value = 'real'
   selectedGroupType.value = isC5Import.value && isImportAccountPlatform(connectUpstreamPlatform.value) ? connectUpstreamPlatform.value : ''
@@ -1332,6 +1410,8 @@ const closeConnector = () => {
   if (connectSubmitLocked.value || connectOutcome.value === 'submitting') return
   connectorGeneration++
   connectingRate.value = null
+  isReconnectConnector.value = false
+  reconnectPricingNotice.value = false
   connectOwnGroups.value = []
   connectMode.value = 'real'
   realConnectError.value = ''
@@ -1873,6 +1953,7 @@ const checkAttentionSite = async (connection: RealConnection) => {
   attentionCheckSummary.value = ''
   let result: ScopedCheckResult | undefined
   let failure = ''
+  checkRequestPending.value = true
   try { result = await checkScopedRealConnections({ ...scope, mode: 'manual' }, controller.signal) }
   catch (error) {
     if (!isCurrent()) return
@@ -1880,6 +1961,7 @@ const checkAttentionSite = async (connection: RealConnection) => {
     else failure = `本站账号核对未完成：${displayCause(error)}；请重新读取已有对接，并查看Hub后端账号检查记录后重试。`
   }
   if (!isCurrent()) return
+  checkRequestPending.value = false
   const [reread, ratesRead] = await Promise.all([loadAttention(isCurrent), loadLocalPage({ generation, isCurrent })])
   if (!isCurrent()) return
   // Only a before/after public identity and the exact confirmed status can
@@ -2133,7 +2215,7 @@ const historyRowKey = (row: GroupRateHistoryRow, index: number): string => (
         <p class="text-sm font-medium text-foreground break-words">{{ siteMenuRate.siteName }} · {{ siteMenuRate.groupName }}</p>
         <p class="mt-1 text-xs text-muted-foreground">只跳转，不会修改主站。</p>
       </div>
-      <button v-for="item in siteMenuHealthItems" :key="item.key" type="button" role="menuitem" :disabled="Boolean(item.disabledReason)" :aria-disabled="item.disabledReason ? 'true' : undefined" class="block w-full px-3 py-2.5 text-left text-sm text-muted-foreground" :class="item.disabledReason ? 'cursor-not-allowed opacity-60' : 'hover:bg-surface-line hover:text-foreground'" @click="goToHealthGroup(item)">
+      <button v-for="item in siteMenuHealthItems" :key="item.key" type="button" role="menuitem" :disabled="Boolean(item.disabledReason) || siteMenuNavigating" :aria-disabled="item.disabledReason ? 'true' : undefined" class="block w-full px-3 py-2.5 text-left text-sm text-muted-foreground" :class="item.disabledReason ? 'cursor-not-allowed opacity-60' : 'hover:bg-surface-line hover:text-foreground'" @click="goToHealthGroup(item)">
         <span class="block">{{ item.label }}</span>
         <span class="mt-1 block text-xs leading-5">{{ item.disabledReason || '在分组健康选中这个主站分组，并标出对应账号' }}</span>
       </button>
@@ -2459,6 +2541,10 @@ const historyRowKey = (row: GroupRateHistoryRow, index: number): string => (
                     :title="connectionOperationBlocked(rate) ? operationBlockedReason : t('admin.groupRates.groupEditor.actionHint')"
                     @click="openGroupEditor(rate)"
                   >{{ t('admin.groupRates.groupEditor.action') }}</Button>
+                  <Button v-if="canReconnectRate(rate)" variant="secondary" size="sm" class="!h-7 gap-1 whitespace-nowrap !px-2.5 !text-xs text-primary" :disabled="isActionLoading || isCheckingConnections || reconnectChecking || isAnyDialogOpen" @click="openReconnect(rate)">
+                    <Link2 class="h-3 w-3" />重新对接
+                  </Button>
+                  <span v-if="canReconnectRate(rate)" class="max-w-48 text-xs text-muted-foreground">旧主站账号已删除，可以直接新建或绑定一个账号，旧记录不会被删除。</span>
                   <Button
                     v-if="isMainAccountMissing(rate)"
                     variant="destructive"
@@ -2642,7 +2728,7 @@ const historyRowKey = (row: GroupRateHistoryRow, index: number): string => (
         <div class="flex items-start justify-between gap-4 border-b border-border/50 p-6">
           <div class="min-w-0 flex-1">
             <h2 id="group-rate-connect-title" class="break-words text-xl font-semibold text-foreground">
-              {{ t('admin.groupRates.connect.titleWithGroup', { site: connectingRate.siteName, group: connectingRate.groupName }) }}
+              {{ isReconnectConnector ? `重新对接：${connectingRate.siteName} · ${connectingRate.groupName}` : t('admin.groupRates.connect.titleWithGroup', { site: connectingRate.siteName, group: connectingRate.groupName }) }}
             </h2>
             <p class="mt-2 text-sm text-muted-foreground">
               {{ connectMode === 'bind' ? t('admin.groupRates.connect.bindDescription') : t('admin.groupRates.connect.realDescription') }}
@@ -2655,6 +2741,8 @@ const historyRowKey = (row: GroupRateHistoryRow, index: number): string => (
         </div>
 
         <form class="space-y-5 p-6" @submit.prevent="submitConnector">
+          <p v-if="isReconnectConnector" class="text-sm text-muted-foreground">本次会新建主站账号和上游 Key，或绑定已有资源（根据你选择的方式）。不会删除或恢复已删除的账号，也不会删除旧 Key。</p>
+          <p v-if="reconnectPricingNotice" class="mb-3 rounded-lg border border-warning/30 bg-warning/10 p-3 text-sm leading-6 text-warning">原调价映射仍保留。重新接入这个上游分组后，原映射可能恢复作为自动调价的来源；本次勾选“添加到调价映射”只决定新关联，不会取消原映射。不希望恢复时，请先到原调价配置调整。</p>
           <fieldset class="contents" :disabled="connectFormLocked">
           <div class="grid gap-3 sm:grid-cols-2">
             <button
@@ -2751,6 +2839,7 @@ const historyRowKey = (row: GroupRateHistoryRow, index: number): string => (
                 <ChevronDown class="h-3.5 w-3.5" />
               </div>
             </div>
+            <p v-if="isC5Import" class="text-xs leading-5 text-muted-foreground">账号名将带所选主站账号平台，例如 A-GPT-【站点】-0.15x；平台名称只表示账号平台，不保证实际支持的全部模型。不会改已有账号名称。</p>
             <p v-if="isC5Import" class="text-xs leading-5 text-muted-foreground" data-import-platform-hint>{{ t('admin.groupRates.connect.accountPlatformHint') }}</p>
             <p v-if="isC5Import && connectAccountPlatform === 'grok'" class="text-xs leading-5 text-muted-foreground">{{ t('admin.groupRates.connect.grokImportHint') }}</p>
           </div>

@@ -101,6 +101,8 @@ type Service struct {
 	safeAdminDeletion   SafeAdminAccountDeletion
 	managedGroupChanger ManagedAccountGroupChanger
 	now                 func() time.Time
+	inventoryMutex      sync.Mutex
+	inventoryInFlight   map[[2]string]bool
 	creationMutex       sync.Mutex
 	creationTargets     map[connectionCreationTarget]bool
 	creationOperations  map[connectionCreationOperation]bool
@@ -1108,17 +1110,27 @@ func randomKeyPrefix() string {
 	return keyPrefixes[int(b[0])%len(keyPrefixes)]
 }
 
-// groupTypePrefix 根据分组类型返回账号名称前缀（A=OpenAI, B=Anthropic, C=Gemini, D=Antigravity）。
+// groupTypePrefix 保留原字母和排序习惯，并显示实际主站账号平台。
 func groupTypePrefix(groupType string) string {
 	switch strings.ToLower(groupType) {
 	case "openai":
-		return "A"
+		return "A-GPT"
 	case "anthropic":
-		return "B"
+		return "B-Claude"
 	case "gemini":
-		return "C"
+		return "C-Gemini"
 	case "antigravity":
-		return "D"
+		return "D-Antigravity"
+	case "grok":
+		return "X-Grok"
+	case "kimi":
+		return "X-Kimi"
+	case "zhipu":
+		return "X-GLM"
+	case "deepseek":
+		return "X-DeepSeek"
+	case "minimax":
+		return "X-MiniMax"
 	default:
 		return "X"
 	}

@@ -60,6 +60,7 @@ type Server struct {
 	userActivityService            *user_activity.Service
 	vipService                     *vip.Service
 	reportsService                 *reports.Service
+	mainAccountCheckSchedule       *my_sites.InventorySchedule
 	chanshuiService                *chanshui.Service
 	signupRiskService              *signup_risk.Service
 	upstreamService                interface {
@@ -323,6 +324,12 @@ func New(cfg config.Config, db *pgxpool.Pool, redisClient *redis.Client) *Server
 	}
 
 	settings.RegisterRoutes(server.mux, settingsService)
+	mainAccountCheckSchedule := my_sites.NewInventorySchedule(settingsService, mySitesService, redisClient)
+	settings.RegisterMainAccountCheckRoutes(server.mux, settingsService, mainAccountCheckSchedule)
+	if !cfg.APIOnly {
+		mainAccountCheckSchedule.Start()
+		server.mainAccountCheckSchedule = mainAccountCheckSchedule
+	}
 
 	// 仪表盘 admin 登录门禁：复用 sub2api 平台客户端（platformService），会话存于 Redis，
 	// 并启动后台协程对临期令牌做自动刷新。
@@ -551,6 +558,11 @@ func (s *Server) Shutdown(ctx context.Context) error {
 		s.upstreamService.StopSiteSyncRetries()
 	}
 	var shutdownErrors []error
+	if s.mainAccountCheckSchedule != nil {
+		if err := s.mainAccountCheckSchedule.Shutdown(ctx); err != nil {
+			shutdownErrors = append(shutdownErrors, err)
+		}
+	}
 	if s.reportsService != nil {
 		if err := s.reportsService.Shutdown(ctx); err != nil {
 			shutdownErrors = append(shutdownErrors, err)

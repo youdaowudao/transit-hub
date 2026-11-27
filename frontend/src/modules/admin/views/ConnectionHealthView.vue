@@ -31,6 +31,7 @@ import {
 import type { AdminGroupsRefreshSite, ProbeTargetProgressPhase, RemoteActionCurrent, TargetMultiplierRefreshSite } from '../api/connectionHealth'
 import { listUpstreamSites } from '../api/upstream'
 import { listRealConnections } from '../api/mySites'
+import { useMainAccountInventoryCheck } from '../composables/useMainAccountInventoryCheck'
 import type { UpstreamSiteResponse } from '../types/upstream'
 import { safeScopedErrorText } from '../utils/scopedErrorText'
 import { canOpenManualProbeHistory, connectionHealthMessageKey, formatConnectionHealthTime, testProtocolName, useConnectionHealth } from '../composables/useConnectionHealth'
@@ -816,14 +817,14 @@ const boundSiteRateFailureReason = (error: unknown): string => {
 // async 包装让同步抛出的错误也成为失败结果；本函数自己不抛错。
 const settleBoundSiteRead = async <T,>(read: () => Promise<T>): Promise<T> => read()
 
-const loadBoundSiteRateStatus = async (): Promise<void> => {
+const loadBoundSiteRateStatus = async (owner: () => boolean = () => true): Promise<boolean> => {
   const seq = ++boundSiteRateSeq
   const [sitesResult, connectionsResult] = await Promise.allSettled([
     settleBoundSiteRead(() => listUpstreamSites()),
     settleBoundSiteRead(() => listRealConnections()),
   ])
   // 较早发出的读取（含切换工作区前发出的）成功、失败都丢弃。
-  if (seq !== boundSiteRateSeq) return
+  if (seq !== boundSiteRateSeq || !owner()) return false
   const sites = sitesResult.status === 'fulfilled' && Array.isArray(sitesResult.value) ? sitesResult.value : null
   const connections = connectionsResult.status === 'fulfilled' && Array.isArray(connectionsResult.value) ? connectionsResult.value : null
   const accountLabels: Record<string, AccountFocusLabel> = Object.create(null)
@@ -848,14 +849,18 @@ const loadBoundSiteRateStatus = async (): Promise<void> => {
       if (siteId) boundIds.add(siteId)
     }
     boundSiteRateState.value = { kind: 'ready', sites, connections, boundIds, accountLabels }
-    return
+    return true
   }
   const unknown = t('admin.connectionHealth.boundSiteRateStatus.reasonUnknown')
   const reasons: string[] = []
   if (!sites) reasons.push(sitesResult.status === 'rejected' ? boundSiteRateFailureReason(sitesResult.reason) : unknown)
   if (!connections) reasons.push(connectionsResult.status === 'rejected' ? boundSiteRateFailureReason(connectionsResult.reason) : unknown)
   boundSiteRateState.value = { kind: 'failed', failedSites: !sites, failedConnections: !connections, reasons, accountLabels }
+  return false
 }
+const mainAccountInventoryCheck = useMainAccountInventoryCheck(() => currentAccount.value, loadBoundSiteRateStatus)
+const { busy: inventoryBusy, summary: inventorySummary, error: inventoryError } = mainAccountInventoryCheck
+const checkMainAccountInventory = () => mainAccountInventoryCheck.run()
 
 const boundSiteRateTime = (value: unknown): string => {
   const parsed = typeof value === 'string' && value ? new Date(value) : null
@@ -1128,6 +1133,7 @@ onMounted(() => { mainTableMounted.value = true; recentSummaries.resume(); refre
 onActivated(() => { mainTableMounted.value = true; recentSummaries.refreshTargets(displayedQuestionAnswerTargetIds.value); refreshOnEntry() })
 onDeactivated(() => {
   mainTableMounted.value = false
+  mainAccountInventoryCheck.reset()
   recentSummaries.suspend()
   clearMultiplierRefreshResults()
   clearRemoteAction()
@@ -1866,6 +1872,7 @@ const openModelAuditAccount = (account: AdminGroupAccount) => modelAudit.open({ 
           <Activity class="h-4 w-4" />
           {{ t('admin.connectionHealth.topActions.events') }}
         </Button>
+        <Button v-if="currentAccount?.platform === 'sub2api'" variant="secondary" size="sm" :disabled="inventoryBusy || !currentAccount?.createdAt" data-testid="health-check-main-accounts" @click="checkMainAccountInventory">核对主站账号</Button>
         <Button variant="secondary" size="sm" :disabled="refreshLoading" @click="refresh">
           <Loader2 v-if="manualRefreshLoading" class="h-4 w-4 animate-spin" />
           <RefreshCw v-else class="h-4 w-4" />
@@ -1882,6 +1889,12 @@ const openModelAuditAccount = (account: AdminGroupAccount) => modelAudit.open({ 
         </span>
       </div>
     </header>
+    <div v-if="currentAccount?.platform === 'sub2api'" class="text-xs text-muted-foreground space-y-1" aria-live="polite">
+      <p>核对当前工作区的全部对接，不探活、不修改主站。对接状态和分组名单按最近读取结果显示；定时核对结果在重新打开后显示。</p>
+      <p v-if="inventoryBusy">正在核对主站账号，请稍候。</p>
+      <p v-if="inventorySummary">{{ inventorySummary }}</p>
+      <p v-if="inventoryError" role="alert" class="text-warning break-words">{{ inventoryError }}</p>
+    </div>
 
     <p
       v-if="refreshConflictText"

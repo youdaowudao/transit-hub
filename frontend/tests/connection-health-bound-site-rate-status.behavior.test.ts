@@ -26,6 +26,7 @@ const harness = vi.hoisted(() => ({
   getPrioritySyncStatus: vi.fn(),
   listUpstreamSites: vi.fn(),
   listRealConnections: vi.fn(),
+  checkInventory: vi.fn(),
   cancelAdminGroupsRefresh: vi.fn(),
   setAdminGroupsWorkspace: vi.fn(),
 }))
@@ -58,6 +59,8 @@ vi.mock('@/modules/admin/api/upstream', async () => {
 
 vi.mock('@/modules/admin/api/mySites', () => ({
   listRealConnections: harness.listRealConnections,
+  checkScopedRealConnections: harness.checkInventory,
+  ScopedCheckApiError: class extends Error {},
 }))
 
 vi.mock('@/modules/admin/composables/useAdminAccounts', async () => {
@@ -421,4 +424,15 @@ describe('bound upstream site rate status on group health', () => {
     expect(failedNames.text()).not.toContain('辅助读取失败（已对接站点）')
     expect(block(failedNames).text()).toContain(P6_PREFIX)
   })
+})
+
+it('manual inventory updates the saved missing count without triggering the old full refresh', async () => {
+  harness.currentAccount.value={id:'ws1',platform:'sub2api',createdAt:'2026-11-27T01:00:00Z',displayName:'测试工作区'}
+  const w=await mountView()
+  harness.checkInventory.mockImplementationOnce(async()=>{
+    harness.listRealConnections.mockResolvedValue([connection('s1','missing')]);return {workspaceAdminAccountId:'ws1',total:1,confirmedConnectionIds:['c-s1'],confirmedStatuses:{'c-s1':'missing'},unconfirmedConnectionIds:[],changedConnectionIds:[],skippedConnectionIds:[],issues:[],storageUncertain:false}
+  })
+  await w.get('[data-testid="health-check-main-accounts"]').trigger('click');await flushPromises()
+  expect(harness.checkInventory).toHaveBeenCalledWith({workspaceAdminAccountId:'ws1',workspaceCreatedAt:'2026-11-27T01:00:00Z',mode:'inventory',workspaceWide:true},expect.any(AbortSignal))
+  expect(w.text()).toContain('1 条已删除');expect(w.text()).toContain('有 1 条对接已被标记为主站账号不存在');expect(harness.refreshAdminGroups).not.toHaveBeenCalled()
 })

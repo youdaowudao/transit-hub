@@ -1561,7 +1561,7 @@ func (s *PlatformService) fetchSub2APIKeyUsage(ctx context.Context, session Sess
 // token 记录自带分组字段时直接按 token_name+group 查询；否则仅按 token_name 查询自助统计接口
 // （沿用已验证的 self 统计能力，不做 token×全部分组的穷举以控制并发/请求量）。
 // 并发上限 maxKeyConcurrency，只保留今日 quota 换算金额 > 0 的 token。
-func (s *PlatformService) fetchNewAPIKeyUsageToday(ctx context.Context, session Session, _ []GroupInfo, includeZero bool, date string) ([]KeyUsageTodayStat, error) {
+func (s *PlatformService) fetchNewAPIKeyUsageToday(ctx context.Context, session Session, _ []GroupInfo, includeZero bool, date string, fallbackCatalog ...*[]KeyUsageTodayStat) ([]KeyUsageTodayStat, error) {
 	if session.Platform != PlatformNewAPI || !session.IsAuthenticated() {
 		return nil, newRequestError(ErrorAuth, PlatformNewAPI)
 	}
@@ -1667,6 +1667,17 @@ func (s *PlatformService) fetchNewAPIKeyUsageToday(ctx context.Context, session 
 		merged = append(merged, record)
 	}
 	records = merged
+	if len(fallbackCatalog) > 0 {
+		catalog := make([]KeyUsageTodayStat, 0, len(records))
+		for _, record := range records {
+			groupName := record.groupName
+			if groupName == "" {
+				groupName = "Ungrouped"
+			}
+			catalog = append(catalog, KeyUsageTodayStat{KeyID: record.id, KeyIDs: append([]string(nil), record.ids...), Merged: len(record.ids) > 1, KeyName: record.name, GroupName: groupName})
+		}
+		*fallbackCatalog[0] = catalog
+	}
 
 	const maxKeyConcurrency = 4
 	sem := make(chan struct{}, maxKeyConcurrency)
@@ -1690,7 +1701,7 @@ func (s *PlatformService) fetchNewAPIKeyUsageToday(ctx context.Context, session 
 			startTS, endTS, err := businessDayUnixBounds(date)
 			if err != nil {
 				mu.Lock()
-				if firstErr == nil {
+				if firstErr == nil || len(fallbackCatalog) > 0 && newAPIStatisticsPending(firstErr) && !newAPIStatisticsPending(err) {
 					firstErr = err
 				}
 				mu.Unlock()
@@ -1703,7 +1714,7 @@ func (s *PlatformService) fetchNewAPIKeyUsageToday(ctx context.Context, session 
 			response, err := s.requestKeyUsageJSONWithContext(ctx, statURL, cookieOptions)
 			if err != nil {
 				mu.Lock()
-				if firstErr == nil {
+				if firstErr == nil || len(fallbackCatalog) > 0 && newAPIStatisticsPending(firstErr) && !newAPIStatisticsPending(err) {
 					firstErr = err
 				}
 				mu.Unlock()
@@ -1713,7 +1724,7 @@ func (s *PlatformService) fetchNewAPIKeyUsageToday(ctx context.Context, session 
 			amountPtr := quotaToUSDWithUnit(quota, session.QuotaPerUnit)
 			if amountPtr == nil || !finiteNonnegative(*amountPtr) {
 				mu.Lock()
-				if firstErr == nil {
+				if firstErr == nil || len(fallbackCatalog) > 0 && newAPIStatisticsPending(firstErr) {
 					firstErr = datedCostError(session.Platform, "metrics", "Token编号 "+record.id+" 缺少quota实际费用字段或金额无效")
 				}
 				mu.Unlock()
@@ -2473,6 +2484,9 @@ func (s *PlatformService) FetchGroupCostStatsForDate(ctx context.Context, sessio
 		err = newRequestError(ErrorUnsupported, session.Platform)
 	}
 	if err != nil {
+		if session.Platform == PlatformNewAPI && newAPIStatisticsPending(err) {
+			return s.fetchRawLogGroupCosts(ctx, session, groups, date, a, err)
+		}
 		return GroupCostFetchResult{}, &groupCostFetchError{err: err, path: "summary"}
 	}
 	b, _, err := s.fetchAccountCostForDateContext(ctx, session, date)
@@ -2481,6 +2495,10 @@ func (s *PlatformService) FetchGroupCostStatsForDate(ctx context.Context, sessio
 	}
 	result, err := reconcileGroupCosts(session.Platform, groups, stats, a, b)
 	if err != nil {
+		var mismatch *groupCostComparisonError
+		if session.Platform == PlatformNewAPI && errors.As(err, &mismatch) {
+			return s.fetchRawLogGroupCosts(ctx, session, groups, date, b, err)
+		}
 		return GroupCostFetchResult{}, &groupCostFetchError{err: err, path: "summary"}
 	}
 	return result, nil

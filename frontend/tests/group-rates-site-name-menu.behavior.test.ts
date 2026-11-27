@@ -97,10 +97,13 @@ describe('new site menu RED', () => {
   expect(menu().textContent).toContain('在分组健康选中这个主站分组，并标出对应账号')
   expect(menu().textContent).toContain('在新标签页打开 up.example.test:8443'); expect(menu().textContent).not.toContain('/path')
  })
- it('F2 navigates with four focus parameters and adds no requests', async () => {
+ it('F2 navigates with four focus parameters after a single local check', async () => {
   const w = await open(); const n = h.calls.length; await openMenu(w); await pick('去分组健康：乙组')
   expect(h.push).toHaveBeenCalledWith({name:'AdminConnectionHealth',query:{focusGroupId:'12',focusGroupName:'乙组',focusAccountIds:'501',focusWorkspace:'ws-scoped'}})
-  expect(menu()).toBeNull(); expect(h.calls).toHaveLength(n)
+  expect(menu()).toBeNull(); expect(h.calls.slice(n).map(c=>c.path)).toEqual([expect.stringContaining('/real-connections/list-scoped')])
+ })
+ it('blocks an open page from navigating with a locally stale active connection after scheduled deletion marking', async () => {
+  const w=await open();await openMenu(w);h.connections=h.connections.map(c=>({...c,status:'missing'}));await pick('去分组健康：甲组');expect(h.push).not.toHaveBeenCalled();expect(w.text()).toContain('主站账号已删除');expect(w.text()).toContain('重新对接')
  })
  it('F2 keeps the existing page transition working when navigating away', async () => {
   const showRates=ref(true)
@@ -134,7 +137,7 @@ describe('new site menu RED', () => {
  })
  it.each([
   ['H1','对接资料还没读到，请点‘刷新数据’后再试。'],
-  ['H2','对接的主站账号已不存在，分组健康里看不到它；可点右侧‘清理本地失效对接’。'],
+  ['H2','对接的主站账号已不存在，分组健康里看不到它；可点右侧‘重新对接’，尚未确认时会先核对。'],
   ['H2a','对接的主站账号已不存在，这个上游分组也已删除，分组健康里没有可查看的内容。'],
   ['H3','这个上游分组还没对接主站账号，分组健康里没有它；需要时点右侧‘配置对接’。'],
   ['H3a','这个上游分组已删除，也没有对接主站账号，分组健康里没有可查看的内容。'],
@@ -178,10 +181,32 @@ describe('new site menu RED', () => {
   expect(button(w,'刷新数据').element).toHaveProperty('disabled',true);expect(trigger(w).element).toHaveProperty('disabled',false)
   await openMenu(w);await pick('去分组健康：甲组');expect(h.push).toHaveBeenCalled();pending.resolve(json(result()));await flushPromises()
  })
+ it.each(['unconfirmed','failed'] as const)('blocks navigation as soon as a %s response arrives, before the local reread finishes',async kind=>{
+  const pending=deferred<Response>(),reread=deferred<Response>();h.check=()=>pending.promise
+  const w=await open();await openMenu(w);expect(item('去分组健康：甲组')).toHaveProperty('disabled',false)
+  h.local=()=>reread.promise
+  pending.resolve(kind==='unconfirmed'?json(result([])):json({message:'主站账号核对失败，请稍后重试'},500));await flushPromises()
+  expect(item('去分组健康：甲组')).toHaveProperty('disabled',true)
+  await pick('去分组健康：甲组');expect(h.push).not.toHaveBeenCalled()
+  reread.resolve(json({workspaceAdminAccountId:h.currentAccount.value.id,items:h.connections}));await flushPromises();expect(h.push).not.toHaveBeenCalled()
+  h.local=async()=>json({workspaceAdminAccountId:h.currentAccount.value.id,items:h.connections});h.check=async()=>json(result())
+  await button(w,'刷新数据').trigger('click');await flushPromises();if(menu())await openMenu(w);await openMenu(w)
+  expect(item('去分组健康：甲组')).toHaveProperty('disabled',false)
+  await pick('去分组健康：甲组');expect(h.push).toHaveBeenCalled()
+ })
+ it('does not make a group actionable using another binding of the same account',async()=>{
+  const first={...h.connections[0],ownGroupIds:['11'],ownGroupNames:['甲组']}
+  const second={...first,id:'other',ownGroupIds:['12'],ownGroupNames:['乙组']}
+  h.connections=[first,second];h.check=async()=>json(result([second]))
+  const w=await open();await openMenu(w)
+  expect(item('去分组健康：甲组')).toHaveProperty('disabled',true)
+  expect(item('去分组健康：乙组')).toHaveProperty('disabled',false)
+  await pick('去分组健康：乙组');expect(h.push.mock.calls.at(-1)?.[0].query.focusGroupId).toBe('12')
+ })
  it('F11 trims, deduplicates and sorts accounts and omits absent accounts',async()=>{
   const base=h.connections[0];h.connections=[{...base,adminAccountId:' 502 ',ownGroupIds:['11'],ownGroupNames:['甲组']},{...base,id:'b',adminAccountId:'501',ownGroupIds:['11'],ownGroupNames:['甲组']},{...base,id:'c',adminAccountId:'501',ownGroupIds:['11'],ownGroupNames:['甲组']},{...base,id:'d',adminAccountId:'',ownGroupIds:['12'],ownGroupNames:['乙组']}]
   const w=await open();await openMenu(w);await pick('去分组健康：甲组');expect(h.push.mock.calls.at(-1)![0].query.focusAccountIds).toBe('501,502')
-  await openMenu(w);await pick('去分组健康：乙组');expect(h.push.mock.calls.at(-1)![0].query.focusAccountIds).toBeUndefined()
+  const previous = h.push.mock.calls.length; await openMenu(w); expect(item('去分组健康：乙组')).toHaveProperty('disabled',true); await pick('去分组健康：乙组');expect(h.push.mock.calls.length).toBe(previous)
  })
  it.each(['scroll','resize','data','workspace'])('F12 closes on %s without an outside click',async kind=>{
   const w=await open();await openMenu(w);expect(menu()).not.toBeNull();await flushPromises();expect(menu()).not.toBeNull()

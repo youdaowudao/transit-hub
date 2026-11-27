@@ -208,8 +208,17 @@ func (s *PlatformService) fetchDatedKeyCollection(ctx context.Context, session S
 	if err != nil {
 		return nil, 0, time.Time{}, err
 	}
-	items, err := s.fetchKeyUsageForDate(ctx, session, groups, date)
+	var items, catalog []KeyUsageTodayStat
+	allowFallback := session.Platform == PlatformNewAPI && date == businesstime.DateAt(s.keyUsageNow())
+	if allowFallback {
+		items, err = s.fetchNewAPIKeyUsageToday(ctx, session, groups, true, date, &catalog)
+	} else {
+		items, err = s.fetchKeyUsageForDate(ctx, session, groups, date)
+	}
 	if err != nil {
+		if allowFallback && catalog != nil && newAPIStatisticsPending(err) {
+			return s.fetchRawLogKeyCosts(ctx, session, date, catalog, a, err)
+		}
 		return nil, 0, time.Time{}, err
 	}
 	b, observedAt, err := s.fetchAccountCostForDateContext(ctx, session, date)
@@ -217,6 +226,9 @@ func (s *PlatformService) fetchDatedKeyCollection(ctx context.Context, session S
 		return nil, 0, time.Time{}, err
 	}
 	if err = validateDatedKeyCollection(date, a, b, items); err != nil {
+		if allowFallback && catalog != nil && math.Abs(a-b) <= 1e-9 {
+			return s.fetchRawLogKeyCosts(ctx, session, date, catalog, b, err)
+		}
 		return nil, 0, time.Time{}, err
 	}
 	return items, b, observedAt, nil

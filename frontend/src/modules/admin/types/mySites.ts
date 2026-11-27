@@ -342,7 +342,9 @@ export interface ConnectionsNeedingAttentionResponse {
 export interface ScopedGroupRef { siteId: string; groupId: string; groupName: string }
 export interface ScopedCheckRequest {
   workspaceAdminAccountId: string
-  mode: 'automatic' | 'manual'
+  mode: 'automatic' | 'manual' | 'inventory'
+  workspaceCreatedAt?: string
+  workspaceWide?: boolean
   siteId?: string
   groupRefs?: ScopedGroupRef[]
 }

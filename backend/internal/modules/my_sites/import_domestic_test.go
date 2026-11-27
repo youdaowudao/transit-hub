@@ -9,15 +9,14 @@ import (
 	"testing"
 )
 
+var expectedImportPrefix = map[string]string{"openai": "A-GPT", "anthropic": "B-Claude", "gemini": "C-Gemini", "antigravity": "D-Antigravity", "grok": "X-Grok", "kimi": "X-Kimi", "zhipu": "X-GLM", "deepseek": "X-DeepSeek", "minimax": "X-MiniMax"}
+
 func TestC51AllOpenAIFamilyImports(t *testing.T) {
 	family := []string{"openai", "kimi", "zhipu", "deepseek", "minimax"}
 	for _, source := range family {
 		for _, target := range family {
 			t.Run(source+"/"+target, func(t *testing.T) {
-				prefix := "X"
-				if target == "openai" {
-					prefix = "A"
-				}
+				prefix := expectedImportPrefix[target]
 				c51AssertImportedPlatform(t, source, " "+strings.ToUpper(target)+" ", target, prefix)
 			})
 		}
@@ -26,7 +25,7 @@ func TestC51AllOpenAIFamilyImports(t *testing.T) {
 
 func TestImportSelectionAllSourceAndTargetPlatforms(t *testing.T) {
 	platforms := []string{"openai", "kimi", "zhipu", "deepseek", "minimax", "anthropic", "gemini", "antigravity", "grok"}
-	prefixes := map[string]string{"openai": "A", "anthropic": "B", "gemini": "C", "antigravity": "D", "grok": "X", "kimi": "X", "zhipu": "X", "deepseek": "X", "minimax": "X"}
+	prefixes := expectedImportPrefix
 	for _, source := range platforms {
 		for _, target := range platforms {
 			t.Run(source+"/"+target, func(t *testing.T) {
@@ -62,7 +61,9 @@ func TestC51DomesticPassthroughRejectedBeforeResources(t *testing.T) {
 
 func TestC51DomesticRequestPlatformFallback(t *testing.T) {
 	for _, platform := range []string{"kimi", "zhipu", "deepseek", "minimax", "grok"} {
-		t.Run(platform, func(t *testing.T) { c51AssertImportedPlatform(t, platform, "   ", platform, "X") })
+		t.Run(platform, func(t *testing.T) {
+			c51AssertImportedPlatform(t, platform, "   ", platform, expectedImportPrefix[platform])
+		})
 	}
 }
 

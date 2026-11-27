@@ -12,6 +12,7 @@ type ScopedGroupRef struct {
 	GroupName string `json:"groupName"`
 }
 type ScopedConnectionScope struct {
+	WorkspaceWide           bool             `json:"workspaceWide,omitempty"`
 	WorkspaceAdminAccountID string           `json:"workspaceAdminAccountId"`
 	SiteID                  string           `json:"siteId,omitempty"`
 	GroupRefs               []ScopedGroupRef `json:"groupRefs,omitempty"`
@@ -68,6 +69,8 @@ func scopedReadFailure(step string, cause error) error {
 }
 
 type ScopedCheckRequest struct {
+	WorkspaceWide           bool             `json:"workspaceWide,omitempty"`
+	WorkspaceCreatedAt      string           `json:"workspaceCreatedAt,omitempty"`
 	WorkspaceAdminAccountID string           `json:"workspaceAdminAccountId"`
 	Mode                    string           `json:"mode"`
 	SiteID                  string           `json:"siteId,omitempty"`

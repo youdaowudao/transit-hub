@@ -52,25 +52,25 @@ func c51AssertImportedPlatform(t *testing.T, source, requested, target, prefix s
 }
 
 func TestC51REDN1DomesticSamePlatform(t *testing.T) {
-	c51AssertImportedPlatform(t, "kimi", "", "kimi", "X")
+	c51AssertImportedPlatform(t, "kimi", "", "kimi", "X-Kimi")
 }
 
 func TestC51REDN2OpenAIToDomestic(t *testing.T) {
-	c51AssertImportedPlatform(t, "openai", "kimi", "kimi", "X")
+	c51AssertImportedPlatform(t, "openai", "kimi", "kimi", "X-Kimi")
 }
 
 func TestC51REDN3DomesticToOpenAI(t *testing.T) {
-	c51AssertImportedPlatform(t, "deepseek", "openai", "openai", "A")
+	c51AssertImportedPlatform(t, "deepseek", "openai", "openai", "A-GPT")
 }
 
 func TestC51REDN4UntypedToDomestic(t *testing.T) {
-	c51AssertImportedPlatform(t, "", "zhipu", "zhipu", "X")
+	c51AssertImportedPlatform(t, "", "zhipu", "zhipu", "X-GLM")
 }
 
 func TestC51REDE1ExistingFourSamePlatform(t *testing.T) {
 	for i, platform := range []string{"openai", "anthropic", "gemini", "antigravity"} {
 		t.Run(platform, func(t *testing.T) {
-			c51AssertImportedPlatform(t, platform, platform, platform, []string{"A", "B", "C", "D"}[i])
+			c51AssertImportedPlatform(t, platform, platform, platform, []string{"A-GPT", "B-Claude", "C-Gemini", "D-Antigravity"}[i])
 		})
 	}
 }
@@ -91,7 +91,7 @@ func c51AssertRejectedBeforeResources(t *testing.T, remote *c5RedTransport, requ
 }
 
 func TestC51REDE2ExplicitCrossPlatformChoice(t *testing.T) {
-	c51AssertImportedPlatform(t, "openai", "anthropic", "anthropic", "B")
+	c51AssertImportedPlatform(t, "openai", "anthropic", "anthropic", "B-Claude")
 }
 
 func TestC51REDE3MixedTargetPlatforms(t *testing.T) {
@@ -99,5 +99,5 @@ func TestC51REDE3MixedTargetPlatforms(t *testing.T) {
 }
 
 func TestC51REDE4GrokSourceAndTargetPlatform(t *testing.T) {
-	c51AssertImportedPlatform(t, "grok", "grok", "grok", "X")
+	c51AssertImportedPlatform(t, "grok", "grok", "grok", "X-Grok")
 }

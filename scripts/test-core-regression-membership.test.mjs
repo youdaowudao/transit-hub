@@ -137,6 +137,7 @@ test('core gate includes dated cost business and storage regressions', async () 
 
 test('core gate keeps the scoped group rates business regressions', async () => {
   const script = await readFile(path.join(rootDir, 'scripts/test-core-regression.sh'), 'utf8')
+  assert.match(script, /main-account-inventory\.behavior\.test\.ts/)
   assert.match(script, /group-rates-scoped-critical\.behavior\.test\.ts/)
   assert.match(script, /group-rates-scoped-additional\.behavior\.test\.ts/)
   assert.match(script, /group-rates-scoped-api\.additional\.test\.ts/)

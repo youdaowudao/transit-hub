@@ -9,6 +9,8 @@ import { getStrategySettings } from '../api/settings'
 import { getConnectionHealthAdminGroups } from '../api/connectionHealth'
 import { listRealConnections } from '../api/mySites'
 import { useUpstreamSites } from '../composables/useUpstreamSites'
+import { useAdminAccounts } from '../composables/useAdminAccounts'
+import { useMainAccountInventoryCheck } from '../composables/useMainAccountInventoryCheck'
 import SiteSettingsModal from '../components/upstream/SiteSettingsModal.vue'
 import type { UpstreamFailure, UpstreamGroupInfo, UpstreamMetricValue, UpstreamSite, UpstreamSiteForm, UpstreamStatus } from '../types/upstream'
 import type { AdminGroupHealth } from '../types/connectionHealth'
@@ -16,8 +18,10 @@ import type { RealConnection } from '../types/mySites'
 import { safeScopedErrorText } from '../utils/scopedErrorText'
 import { groupCostForDisplay, groupCostObservedTime, nextGroupCostDisplayBoundary, costFailureText, upstreamAuthPauseHelp, upstreamSiteAuthPaused, upstreamSiteAuthUnconfirmed, sortUpstreamSites, parseUpstreamLink, upstreamWebsiteLink, type UpstreamSortDirection, type UpstreamSortField } from '../utils/upstream'
 
-import { t, locale } from '@/locales'
+import { t, te, locale } from '@/locales'
 const router = useRouter()
+const { currentAccount } = useAdminAccounts()
+const isSub2APIMain = computed(() => currentAccount.value?.platform === 'sub2api')
 const searchQuery = ref('')
 const isAddModalOpen = ref(false)
 const { sites: upstreamSites, isAdding, isForceSaving, isRefreshing, addErrorKey, addFailure, clearAddFailure, connectedCount, enabledSiteCount, enabledUpdatingIds, enabledErrorKeys, pinnedUpdatingIds, pinnedErrorKeys, siteSyncStates, retryReadErrors, syncingSiteIds, addSite, updateSite, deleteSite, setSiteEnabled, setSitePinned, streamRefreshSites, refreshSingleSite, workspaceId, readSiteSnapshot, pendingSiteOperations, saveSiteSettings } = useUpstreamSites()
@@ -378,7 +382,16 @@ let groupReadFailures = 0
 const realConnections = ref<RealConnection[]>([])
 const adminGroupHealth = ref<AdminGroupHealth[]>([])
 
-type GroupCardState = 'unconnected' | 'unscheduled' | 'scheduled'
+type GroupCardState = 'unconnected' | 'unscheduled' | 'scheduled' | 'missing' | 'uncertain'
+const navigationConnectionsReady = ref(false)
+const navigationHealthReady = ref(false)
+const navigationError = ref('')
+const navigationClickBusy = ref(false)
+let navConnectionSeq = 0
+let navHealthSeq = 0
+const isSub2APIConnection = (c: RealConnection) => !c.adminPlatform || c.adminPlatform === 'sub2api'
+const isOperationalConnection = (c: RealConnection) => isSub2APIConnection(c) && Boolean(c.adminAccountId?.trim()) && (!c.status || c.status === 'active')
+
 
 // 可用分组弹窗卡片尺寸配置：保持布局流正常，只放大卡片本身和卡片内容间距。
 const GROUP_CARD_SCALE = 1.5
@@ -390,7 +403,7 @@ const GROUP_CARD_SIZE_STYLE = {
 const connectionMatchesGroup = (connection: RealConnection, siteId: string, group: UpstreamGroupInfo): boolean => (
   connection.upstreamSiteId === siteId &&
   (
-    connection.upstreamGroupId === group.id ||
+    (connection.upstreamGroupId === group.id && (!isSub2APIMain.value || Boolean(connection.upstreamGroupId && group.id))) ||
     ((!connection.upstreamGroupId || !group.id) && connection.upstreamGroupName === group.name)
   )
 )
@@ -407,6 +420,11 @@ const groupHasEnabledProbePolicy = (group: AdminGroupHealth): boolean => (
 )
 
 const connectedAdminGroups = (connections: RealConnection[]): AdminGroupHealth[] => {
+  if (isSub2APIMain.value) {
+    if (!navigationHealthReady.value) return []
+    const ids = new Set(connections.filter(isOperationalConnection).map(c => c.adminAccountId))
+    return adminGroupHealth.value.filter(group => !group.accountsError && Array.isArray(group.accounts) && group.accounts.some(account => ids.has(account.id)))
+  }
   const ids = new Set(connections.flatMap(connection => connection.ownGroupIds ?? []))
   const names = new Set(connections.flatMap(connection => connection.ownGroupNames ?? []))
   return adminGroupHealth.value.filter(group => ids.has(group.id) || names.has(group.name))
@@ -414,12 +432,22 @@ const connectedAdminGroups = (connections: RealConnection[]): AdminGroupHealth[]
 
 const groupCardState = (siteId: string, group: UpstreamGroupInfo): GroupCardState => {
   const connections = connectionsForGroup(siteId, group)
+  if (isSub2APIMain.value) {
+    if (!navigationConnectionsReady.value) return 'uncertain'
+    if (!connections.length) return 'unconnected'
+    if (connections.every(c => isSub2APIConnection(c) && c.status === 'missing' && Boolean(c.adminAccountId?.trim()))) return 'missing'
+    if (!connections.some(isOperationalConnection)) return 'uncertain'
+    const actualGroups = connectedAdminGroups(connections)
+    if (!actualGroups.length) return 'uncertain'
+    return actualGroups.some(groupHasEnabledProbePolicy) ? 'scheduled' : 'unscheduled'
+  }
   if (connections.length === 0) return 'unconnected'
   return connectedAdminGroups(connections).some(groupHasEnabledProbePolicy) ? 'scheduled' : 'unscheduled'
 }
 
 const groupCardClasses = (siteId: string, group: UpstreamGroupInfo): string => {
   const state = groupCardState(siteId, group)
+  if (state === 'missing' || state === 'uncertain') return 'border-warning/50 bg-warning/5 hover:border-warning'
   if (state === 'scheduled') return 'border-emerald-500/50 bg-emerald-500/[0.08] hover:border-emerald-500/75 hover:bg-emerald-500/[0.13]'
   if (state === 'unscheduled') return 'border-primary/50 bg-primary/[0.08] hover:border-primary/75 hover:bg-primary/[0.13]'
   return 'border-border/70 bg-white dark:bg-surface-elevated hover:border-border hover:bg-surface-elevated'
@@ -427,6 +455,7 @@ const groupCardClasses = (siteId: string, group: UpstreamGroupInfo): string => {
 
 const groupStatusClasses = (state: GroupCardState): string => {
   if (state === 'unconnected') return ''
+  if (state === 'missing' || state === 'uncertain') return 'border-warning/30 bg-warning/10 text-warning'
   return state === 'scheduled'
     ? 'border-emerald-500/35 bg-emerald-500/[0.12] text-emerald-700 dark:text-emerald-300'
     : 'border-primary/30 bg-primary/[0.12] text-primary'
@@ -440,18 +469,52 @@ const groupMultiplierClasses = (state: GroupCardState): string => {
 
 const groupStatusLabel = (state: GroupCardState): string => {
   if (state === 'unconnected') return ''
+  if (state === 'missing') return '主站账号已删除 · 可重新对接'
+  if (state === 'uncertain') return '暂时无法定位主站账号'
   return t(state === 'scheduled' ? 'admin.upstream.fields.groupScheduling' : 'admin.upstream.fields.groupNotScheduling')
 }
 
+const readNavigationConnections = async (owner: () => boolean = () => true): Promise<boolean> => {
+  const expectedWorkspace = workspaceId.value, seq = ++navConnectionSeq
+  const current = () => seq === navConnectionSeq && expectedWorkspace === workspaceId.value && owner()
+  try {
+    const result = await listRealConnections()
+    if (!current()) return false
+    if (!Array.isArray(result)) throw new Error('对接列表格式不完整')
+    realConnections.value = result
+    navigationConnectionsReady.value = true
+    navigationError.value = ''
+    return true
+  } catch (err) {
+    if (current()) {
+      navigationConnectionsReady.value = false
+      const message = err instanceof Error ? err.message : ''
+      navigationError.value = `读取最新账号对接失败：${safeScopedErrorText(te(message) ? t(message) : message) || '原因无法确认'}；请重新打开或点击核对，未执行重新对接。`
+      if (!isSub2APIMain.value) realConnections.value = []
+    }
+    return false
+  }
+}
 const loadGroupNavigationData = async () => {
-  const expectedWorkspace = workspaceId.value
-  const [connectionsResult, healthResult] = await Promise.allSettled([
-    listRealConnections(),
-    getConnectionHealthAdminGroups(),
-  ])
-  if (expectedWorkspace !== workspaceId.value) return
-  realConnections.value = connectionsResult.status === 'fulfilled' ? connectionsResult.value : []
-  adminGroupHealth.value = healthResult.status === 'fulfilled' ? healthResult.value : []
+  const expectedWorkspace = workspaceId.value, seq = ++navHealthSeq
+  navigationHealthReady.value = false
+  await Promise.all([readNavigationConnections(), (async () => {
+    try {
+      const result = await getConnectionHealthAdminGroups()
+      if (seq !== navHealthSeq || expectedWorkspace !== workspaceId.value) return
+      if (!Array.isArray(result)) throw new Error('分组列表格式不完整')
+      adminGroupHealth.value = result; navigationHealthReady.value = true
+    } catch {
+      if (seq === navHealthSeq && expectedWorkspace === workspaceId.value) { navigationHealthReady.value = false; adminGroupHealth.value = [] }
+    }
+  })()])
+}
+const inventoryCheck = useMainAccountInventoryCheck(() => currentAccount.value, readNavigationConnections)
+const { busy: inventoryBusy, site: inventorySite, summary: inventorySummary, error: inventoryError } = inventoryCheck
+const checkAllMainAccounts = () => inventoryCheck.run()
+const checkSiteMainAccounts = () => {
+  const siteId = selectedGroupSiteId.value
+  if (siteId) void inventoryCheck.run(siteId, () => isGroupsModalOpen.value && selectedGroupSiteId.value === siteId)
 }
 
 const openGroupsModal = (site: UpstreamSite) => {
@@ -462,6 +525,7 @@ const openGroupsModal = (site: UpstreamSite) => {
 }
 
 const closeGroupsModal = () => {
+  if (inventorySite.value) inventoryCheck.reset()
   isGroupsModalOpen.value = false
   selectedGroupSiteId.value = null
   groupSnapshotError.value = ''
@@ -509,29 +573,46 @@ const multiplierFormula = (site: UpstreamSite, group: UpstreamGroupInfo): string
   })
 )
 
-const openGroupDestination = (group: UpstreamGroupInfo) => {
+const openGroupDestination = async (group: UpstreamGroupInfo) => {
   const site = selectedSiteForGroups.value
-  if (!site) return
+  if (!site || navigationClickBusy.value || inventoryBusy.value) return
+  const expectedWorkspace = workspaceId.value
+  const current = () => expectedWorkspace === workspaceId.value && isGroupsModalOpen.value && selectedGroupSiteId.value === site.id
+  if (isSub2APIMain.value) {
+    navigationClickBusy.value = true
+    try { if (!await readNavigationConnections(current)) return }
+    finally { navigationClickBusy.value = false }
+    if (!current()) return
+  }
   const connections = connectionsForGroup(site.id, group)
-  closeGroupsModal()
-  if (connections.length === 0) {
-    void router.push({
-      name: 'AdminGroupRates',
-      query: { siteId: site.id, focusGroup: group.name, focusGroupId: group.id || undefined },
-    })
+  if (isSub2APIMain.value) {
+    const valid = connections.filter(isOperationalConnection)
+    const groups = connectedAdminGroups(valid)
+    let destination: AdminGroupHealth | undefined
+    for (const connection of valid) {
+      const matching = groups.filter(candidate => candidate.accounts.some(a => a.id === connection.adminAccountId))
+      destination = matching.find(candidate => connection.ownGroupIds?.includes(candidate.id) || connection.ownGroupNames?.includes(candidate.name)) ?? matching[0]
+      if (destination) break
+    }
+    if (destination) {
+      const accountIds = [...new Set(valid.filter(c => destination!.accounts.some(a => a.id === c.adminAccountId)).map(c => c.adminAccountId))]
+      closeGroupsModal()
+      void router.push({ name: 'AdminConnectionHealth', query: { focusGroupId: destination.id, focusGroupName: destination.name, focusAccountIds: accountIds.join(','), focusWorkspace: expectedWorkspace } })
+      return
+    }
+    closeGroupsModal()
+    void router.push({ name: 'AdminGroupRates', query: { siteId: site.id, focusGroup: group.name, focusGroupId: group.id || undefined } })
     return
   }
-
-  const connection = connections[0]
+  closeGroupsModal()
+  if (connections.length === 0) {
+    void router.push({ name: 'AdminGroupRates', query: { siteId: site.id, focusGroup: group.name, focusGroupId: group.id || undefined } })
+    return
+  }
+  const connection = connections[0]!
   const ownGroupId = connection.ownGroupIds?.[0] ?? ''
   const ownGroupName = connection.ownGroupNames?.[0] ?? ''
-  void router.push({
-    name: 'AdminConnectionHealth',
-    query: {
-      focusGroupId: ownGroupId || undefined,
-      focusGroupName: ownGroupId ? undefined : ownGroupName || undefined,
-    },
-  })
+  void router.push({ name: 'AdminConnectionHealth', query: { focusGroupId: ownGroupId || undefined, focusGroupName: ownGroupId ? undefined : ownGroupName || undefined } })
 }
 
 const amountMetricDisplay = (site: UpstreamSite, metric: UpstreamMetricValue): string | null => {
@@ -636,11 +717,12 @@ watch(workspaceId, () => {
   groupSnapshotError.value = ''; groupSiteDeletedMessage.value = ''
   closeSiteSettings()
   realConnections.value = []; adminGroupHealth.value = []
+  navigationConnectionsReady.value = false; navigationHealthReady.value = false; navigationError.value = ''; navConnectionSeq++; navHealthSeq++
   void loadGroupNavigationData()
 }, { flush: 'sync' })
 const onGroupsVisibilityChanged = () => { groupsPageVisible.value = document.visibilityState !== 'hidden' }
 onActivated(() => { groupsPageActive.value = true })
-onDeactivated(() => { groupsPageActive.value = false })
+onDeactivated(() => { groupsPageActive.value = false; inventoryCheck.reset(); navConnectionSeq++; navHealthSeq++ })
 
 const usdMetricDisplay = (metric: UpstreamMetricValue): string => {
   if (metric.display.toUpperCase().includes('USD')) return metric.display
@@ -701,6 +783,7 @@ onMounted(() => {
 })
 
 onBeforeUnmount(() => {
+  navConnectionSeq++; navHealthSeq++
   stopGroupSnapshotRead()
   document.removeEventListener('visibilitychange', onGroupsVisibilityChanged)
   stopCountdown()
@@ -760,6 +843,7 @@ onBeforeUnmount(() => {
         <div class="hidden md:flex h-10 items-center rounded-xl border border-border/50 bg-surface px-3 text-xs text-muted-foreground whitespace-nowrap">
           {{ countdownDisplay }}
         </div>
+        <Button v-if="isSub2APIMain" variant="secondary" class="h-10 flex-1 gap-2 px-4 sm:flex-none" :disabled="inventoryBusy || navigationClickBusy || !currentAccount?.createdAt" data-testid="check-all-main-accounts" @click="checkAllMainAccounts">核对全部主站账号</Button>
         <Button :disabled="isRefreshing" @click="runRefresh" variant="secondary" class="h-10 flex-1 gap-2 px-4 sm:flex-none">
           <Loader2 v-if="isRefreshing" class="w-4 h-4 animate-spin" />
           <RefreshCw v-else class="w-4 h-4" />
@@ -770,6 +854,13 @@ onBeforeUnmount(() => {
           {{ t('admin.upstream.addSite') }}
         </Button>
       </div>
+    </div>
+
+    <div v-if="isSub2APIMain" class="text-xs text-muted-foreground space-y-1" aria-live="polite">
+      <p>只检查主站账号是否还在，并更新调度站的对接状态，不会修改主站或访问外部上游。</p>
+      <p v-if="inventoryBusy && !inventorySite">正在核对主站账号，请稍候。</p>
+      <p v-if="!inventorySite && inventorySummary">{{ inventorySummary }}</p>
+      <p v-if="!inventorySite && inventoryError" role="alert" class="text-warning break-words">{{ inventoryError }}</p>
     </div>
 
     <!-- Cards Grid -->
@@ -1194,7 +1285,16 @@ onBeforeUnmount(() => {
           </div>
 
           <div class="min-h-0 flex-1 space-y-6 overflow-y-auto p-6 overscroll-contain">
- <p class="text-sm text-muted-foreground">费用按新加坡当天统计，按使用时的上游分组计算；这里只显示费用，不会修改主站。数据暂缺时可关闭弹窗后同步这个站点。</p>
+ <div v-if="isSub2APIMain" class="space-y-2 text-xs text-muted-foreground">
+              <Button variant="secondary" size="sm" data-testid="check-site-main-accounts" :disabled="inventoryBusy || navigationClickBusy || !currentAccount?.createdAt" @click="checkSiteMainAccounts">核对本站主站账号</Button>
+              <p>只更新这个上游站点关联的主站账号状态，不会修改主站或上游 Key。</p>
+              <p>对接状态按最近读取结果显示。主站刚有改动，请点击核对；本地定时核对结果在重新打开后显示。</p>
+              <p v-if="inventoryBusy" role="status">正在核对主站账号，请稍候。</p>
+              <p v-if="inventorySite === selectedGroupSiteId && inventorySummary" role="status">{{ inventorySummary }}</p>
+              <p v-if="inventorySite === selectedGroupSiteId && inventoryError" role="alert" class="text-warning break-words">{{ inventoryError }}</p>
+              <p v-if="navigationError" role="alert" class="text-warning break-words">{{ navigationError }}</p>
+            </div>
+            <p class="text-sm text-muted-foreground">费用按新加坡当天统计，按使用时的上游分组计算；这里只显示费用，不会修改主站。数据暂缺时可关闭弹窗后同步这个站点。</p>
  <p v-if="groupSnapshotErrorDisplay" role="alert" class="text-sm text-warning">{{ groupSnapshotErrorDisplay }}</p>
  <p v-for="reason in sharedGroupCostReasons" :key="reason" class="text-sm text-muted-foreground">{{ reason }}</p>
  <p v-if="selectedUnattributedGroup" class="text-sm text-warning" :title="String(selectedUnattributedGroup.unattributedCost)">本站费用 {{ (selectedUnattributedGroup.siteReportedCost ?? 0).toFixed(2) }}，可对应当前分组 {{ (selectedUnattributedGroup.groupAttributedCost ?? 0).toFixed(2) }}，另有 {{ unmatchedCostDisplay(selectedUnattributedGroup.unattributedCost) }} 无法对应当前可用分组；请到上游查看当天消费记录。这里不会分配这部分费用或修改主站。</p>
@@ -1212,17 +1312,20 @@ onBeforeUnmount(() => {
                   class="group flex flex-col items-center justify-center rounded-xl border text-center transition-colors"
                   :class="groupCardClasses(selectedGroupSiteId ?? '', group)"
                   @click="openGroupDestination(group)"
+                  :disabled="navigationClickBusy || inventoryBusy"
                 >
                   <span class="flex w-full flex-wrap items-center justify-center gap-1.5">
                     <span class="min-w-0 max-w-full whitespace-normal break-words text-center text-[22px] font-medium leading-tight text-foreground transition-colors group-hover:text-primary">{{ group.name }}</span>
                     <span
                       v-if="groupCardState(selectedGroupSiteId ?? '', group) !== 'unconnected'"
-                      class="shrink-0 rounded-md border px-1.5 py-0.5 text-[17px] font-semibold leading-tight"
-                      :class="groupStatusClasses(groupCardState(selectedGroupSiteId ?? '', group))"
+                      class="rounded-md border px-1.5 py-0.5 font-semibold leading-tight"
+                      :class="[groupStatusClasses(groupCardState(selectedGroupSiteId ?? '', group)), ['missing', 'uncertain'].includes(groupCardState(selectedGroupSiteId ?? '', group)) ? 'max-w-full whitespace-normal break-words text-sm' : 'shrink-0 text-[17px]']"
                     >
                       {{ groupStatusLabel(groupCardState(selectedGroupSiteId ?? '', group)) }}
                     </span>
                   </span>
+                  <span v-if="groupCardState(selectedGroupSiteId ?? '', group) === 'missing'" class="mt-1 text-xs leading-5 text-muted-foreground">点击到分组倍率重新对接，不需要先清理旧记录。</span>
+                  <span v-else-if="groupCardState(selectedGroupSiteId ?? '', group) === 'uncertain'" class="mt-1 text-xs leading-5 text-muted-foreground">请核对本站主站账号，或到分组倍率查看对接。未确认删除。</span>
                   <span
                     v-if="group.multiplier !== null && selectedSiteForGroups && selectedSiteForGroups.rechargeRate > 0"
                     class="mt-3 rounded-md border px-3 py-2 text-center"

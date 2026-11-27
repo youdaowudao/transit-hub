@@ -147,3 +147,19 @@ export const testSmtpEmail = async (payload: TestSmtpEmailPayload): Promise<Test
     body: JSON.stringify(payload),
   })
 )
+
+export interface MainAccountCheckScope { workspaceAdminAccountId: string; workspaceCreatedAt: string }
+export interface MainAccountCheckRecord {
+  scheduledAt: string; startedAt: string; finishedAt?: string
+  status: 'running' | 'success' | 'partial' | 'failed' | 'skipped' | 'unknown'
+  confirmedActive: number; confirmedMissing: number; unconfirmed: number; skipped: number
+  reason?: string; next?: string
+}
+export interface MainAccountCheckSettings extends MainAccountCheckScope {
+  enabled: boolean; times: string[]; configError?: string; recentScheduled: MainAccountCheckRecord | null; recentReadError?: string
+}
+const accountCheckSettingsPath = '/settings/main-account-check'
+export const readMainAccountCheckSettings = (scope: MainAccountCheckScope, signal?: AbortSignal) =>
+  requestJson<MainAccountCheckSettings>(`${accountCheckSettingsPath}?${new URLSearchParams({ ...scope })}`, { signal })
+export const saveMainAccountCheckSettings = (scope: MainAccountCheckScope, config: { enabled: boolean; times: string[] }, signal?: AbortSignal) =>
+  requestJson<MainAccountCheckSettings>(accountCheckSettingsPath, { method: 'PUT', body: JSON.stringify({ ...scope, ...config }), signal })
